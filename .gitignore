@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Data artifacts
+data/
+!data/.gitkeep
+
+# Models
+models/weights/*
+
+# OS/editor
+.DS_Store
+.vscode/
