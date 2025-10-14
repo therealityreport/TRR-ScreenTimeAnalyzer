@@ -1,0 +1,12 @@
+insightface>=0.7.3
+onnxruntime>=1.19.2  # use onnxruntime-gpu if we add CUDA later; 1.20+ not published for macOS/py3.9 yet
+ultralytics>=8.3.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+pandas>=2.2.0
+pyarrow>=15.0.0
+tqdm>=4.66.0
+pillow>=10.3.0
+streamlit>=1.37.0             # optional labeler UI
+pyyaml>=6.0.0
+pytest>=7.4.0

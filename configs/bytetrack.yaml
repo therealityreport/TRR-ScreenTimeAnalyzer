@@ -1,0 +1,7 @@
+track_buffer: 25
+match_thresh: 0.85
+conf_thres: 0.1
+fuse_score: true
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6

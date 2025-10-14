@@ -1,0 +1,43 @@
+# Frame sampling & detection
+stride: 1                         # process every frame by default
+det_size: [960, 960]              # RetinaFace detection resolution (w, h)
+face_conf_th: 0.45
+person_conf_th: 0.20
+face_in_track_iou: 0.25          # slightly stricter overlap in crowded frames
+allow_face_center: false         # keep center fallback disabled by default
+dilate_track_px: 0.08            # reduce dilation to tighten association
+temporal_iou_tolerance: 1        # allow +/- 1 frame history when associating faces to tracks
+
+# Harvest sampling
+samples_per_track: 8
+samples_min: 4
+samples_max: 12
+min_gap_frames: 8
+min_area_frac: 0.005
+min_area_px: null                 # override if using absolute pixel gate
+min_sharpness_laplacian: null     # optional absolute Laplacian floor (set when needed)
+min_sharpness_pct: 40             # reject samples below this per-track sharpness percentile
+min_frontalness: 0.35             # minimum frontalness for a sample to qualify
+profile_asymmetry_thresh: 0.25    # tighter asymmetry threshold to flag profile views
+quality_weights: [0.35, 0.45, 0.20]  # weights for [sharpness, frontalness, area closeness]
+target_area_frac: 0.06            # area fraction considered "ideal" for quality scoring
+debug_rejections: true            # write harvest_debug.json & detailed reject stats
+multi_face_per_track_guard: true
+multi_face_tiebreak: quality
+fallback_head_pct: 0.4
+
+# Identity purity guard & harvest track indexing
+identity_guard: true
+identity_split: true
+identity_sim_threshold: 0.62
+identity_min_picks: 2
+reindex_harvest_tracks: true
+
+# Track gap handling
+max_gap_ms: 500
+min_run_ms: 200
+
+# Identity voting & persistence
+similarity_th: 0.82
+vote_decay: 0.99
+flip_tolerance: 0.30
