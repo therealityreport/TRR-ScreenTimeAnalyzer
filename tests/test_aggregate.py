@@ -94,3 +94,54 @@ def test_segments_totals_consistency_with_multiple_identities():
     for label, *_ in labels:
         seg_sum = sum(seg.duration_ms for seg in segments if seg.label == label)
         assert totals_map[label] == pytest.approx(seg_sum, rel=1e-6)
+
+
+def test_tracks_to_segments_falls_back_when_subtracks_filtered():
+    fps = 30.0
+    track = TrackState(track_id=9)
+    # Populate frame-level labels spanning 40 frames (~1.33s)
+    for frame in range(40):
+        track.add_label(frame, "EILEEN", 0.92)
+
+    # Add a short subtrack that should be filtered out by min_run_ms
+    track.subtracks.append(
+        Subtrack(
+            start_frame=0,
+            end_frame=10,
+            label="EILEEN",
+            frame_scores={0: 0.92, 5: 0.91},
+        )
+    )
+
+    segments = tracks_to_segments(
+        [track],
+        fps=fps,
+        max_gap_ms=300,
+        min_run_ms=600,
+        use_subtracks=True,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].label == "EILEEN"
+    # 40 frames @30fps ≈ 1333.3ms
+    assert segments[0].duration_ms == pytest.approx(1333.333, rel=1e-3)
+
+
+def test_tracks_to_segments_uses_track_label_when_label_scores_missing():
+    fps = 24.0
+    track = TrackState(track_id=11, label="EILEEN")
+    for frame in range(0, 40):  # ~1.67s of coverage
+        track.add_observation(frame, (0, 0, 10, 10), 0.85, frame / fps * 1000.0)
+
+    segments = tracks_to_segments(
+        [track],
+        fps=fps,
+        max_gap_ms=300,
+        min_run_ms=600,
+        use_subtracks=False,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].label == "EILEEN"
+    assert segments[0].frames == 40
+    assert segments[0].duration_ms == pytest.approx(1666.666, rel=1e-3)

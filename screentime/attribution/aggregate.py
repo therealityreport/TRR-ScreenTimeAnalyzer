@@ -309,6 +309,13 @@ def tracks_to_segments(
                         min_run_ms,
                     )
                 track_segments.extend(segs)
+            if not track_segments and track.label_scores:
+                LOGGER.info(
+                    "Track %d: Subtracks produced no segments; falling back to label_scores (%d labelled frames)",
+                    track_id,
+                    len(track.label_scores),
+                )
+                track_segments.extend(_labels_to_segments(track, fps, max_gap_ms, min_run_ms))
         elif track.label_scores:
             LOGGER.info(
                 "Track %d: Deriving segments from label_scores (%d labelled frames)",
@@ -316,6 +323,14 @@ def tracks_to_segments(
                 len(track.label_scores),
             )
             track_segments.extend(_labels_to_segments(track, fps, max_gap_ms, min_run_ms))
+        elif track.label and track.frames:
+            LOGGER.info(
+                "Track %d: Using track-level label %s for fallback segment conversion (%d frames)",
+                track_id,
+                track.label,
+                len(track.frames),
+            )
+            track_segments.extend(_frames_to_segments(track, fps, max_gap_ms, min_run_ms))
         else:
             LOGGER.debug(
                 "Track %d: No subtracks or label_scores available; skipping segment conversion",
