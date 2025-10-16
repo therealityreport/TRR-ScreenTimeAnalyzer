@@ -1,0 +1,5 @@
+[console_scripts]
+screentime-diagnose = scripts.diagnose_harvest:main
+screentime-harvest = scripts.harvest_faces:main
+screentime-tracker = scripts.run_tracker:main
+screentime-validate = scripts.validate_harvest:main

@@ -275,7 +275,6 @@ def tracks_to_segments(
 
     segments: List[Segment] = []
     for track in tracks:
-        track_segments: List[Segment] = []
         track_id = getattr(track, "byte_track_id", track.track_id)
 
         if use_subtracks and track.subtracks:
@@ -308,34 +307,34 @@ def tracks_to_segments(
                         duration_ms,
                         min_run_ms,
                     )
-                track_segments.extend(segs)
-        elif track.label_scores:
+                segments.extend(segs)
+            continue
+
+        if track.label_scores:
             LOGGER.info(
                 "Track %d: Deriving segments from label_scores (%d labelled frames)",
                 track_id,
                 len(track.label_scores),
             )
-            track_segments.extend(_labels_to_segments(track, fps, max_gap_ms, min_run_ms))
-        else:
-            LOGGER.debug(
-                "Track %d: No subtracks or label_scores available; skipping segment conversion",
-                track_id,
-            )
+            segments.extend(_labels_to_segments(track, fps, max_gap_ms, min_run_ms))
+            continue
 
-        segments.extend(track_segments)
+        LOGGER.debug(
+            "Track %d: No subtracks or label_scores available; skipping segment conversion",
+            track_id,
+        )
 
-    deduped: Dict[tuple, Segment] = {}
+    uniq: Dict[tuple, Segment] = {}
     for seg in segments:
         key = (
             seg.byte_track_id,
             seg.subtrack_id,
             seg.label,
-            round(seg.start_ms),
-            round(seg.end_ms),
+            int(round(seg.start_ms)),
+            int(round(seg.end_ms)),
         )
-        if key not in deduped:
-            deduped[key] = seg
-    return list(deduped.values())
+        uniq[key] = seg
+    return list(uniq.values())
 
 
 def segments_to_totals(segments: Iterable[Segment]) -> pd.DataFrame:

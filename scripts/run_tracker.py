@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import platform
 from pathlib import Path
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from screentime.attribution import aggregate, associate
+from screentime.attribution.coverage import merge_segments_with_fallback, missing_labels_with_coverage
 from screentime.detectors.face_retina import RetinaFaceDetector
 from screentime.detectors.person_yolo import YOLOPersonDetector
 from screentime.io_utils import dump_json, ensure_dir, infer_video_stem, load_yaml, setup_logging
@@ -495,6 +497,8 @@ def main() -> None:
     max_gap_ms = args.max_gap_ms if args.max_gap_ms is not None else pipeline_cfg.get("max_gap_ms", 200)
     min_run_ms = args.min_run_ms if args.min_run_ms is not None else pipeline_cfg.get("min_run_ms", 750)
 
+    video_duration_ms = (frame_idx + 1) / fps * 1000.0 if frame_idx >= 0 else 0.0
+
     segments = aggregate.tracks_to_segments(
         tracks,
         fps=fps,
@@ -502,7 +506,78 @@ def main() -> None:
         min_run_ms=min_run_ms,
         use_subtracks=identity_split_enabled,
     )
-    
+
+    coverage_labels = missing_labels_with_coverage(
+        tracks,
+        segments,
+        known_labels=set(facebank_labels),
+    )
+    if coverage_labels:
+        fallback_min_run = float(pipeline_cfg.get("min_run_fallback_ms", 0.0))
+        if fallback_min_run < 0.0:
+            LOGGER.warning(
+                "Invalid min_run_fallback_ms=%.1f configured; defaulting to 0.0",
+                fallback_min_run,
+            )
+            fallback_min_run = 0.0
+        if fallback_min_run > min_run_ms:
+            LOGGER.warning(
+                "min_run_fallback_ms (%.1f) exceeds min_run_ms (%.1f); capping to min_run_ms",
+                fallback_min_run,
+                min_run_ms,
+            )
+            fallback_min_run = min_run_ms
+        fallback_max_gap = pipeline_cfg.get("max_gap_fallback_ms")
+        if fallback_max_gap is None:
+            fallback_max_gap = video_duration_ms if video_duration_ms > 0 else max_gap_ms
+        try:
+            fallback_max_gap = float(fallback_max_gap)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Invalid max_gap_fallback_ms=%s; defaulting to %.1f",
+                fallback_max_gap,
+                max_gap_ms,
+            )
+            fallback_max_gap = max_gap_ms
+        if not math.isfinite(fallback_max_gap) or fallback_max_gap <= 0.0:
+            LOGGER.warning(
+                "max_gap_fallback_ms=%s not usable; defaulting to %.1f",
+                fallback_max_gap,
+                max_gap_ms,
+            )
+            fallback_max_gap = max_gap_ms
+        fallback_max_gap = max(fallback_max_gap, max_gap_ms)
+
+        fallback_all_segments = aggregate.tracks_to_segments(
+            tracks,
+            fps=fps,
+            max_gap_ms=fallback_max_gap,
+            min_run_ms=fallback_min_run,
+            use_subtracks=True,
+        )
+        fallback_segments = [
+            seg for seg in fallback_all_segments if seg.label in coverage_labels
+        ]
+
+        segments, added_segments = merge_segments_with_fallback(
+            base_segments=segments,
+            fallback_segments=fallback_segments,
+            eligible_labels=coverage_labels,
+        )
+
+        if added_segments:
+            LOGGER.info(
+                "Added %d fallback segments for under-covered labels %s (min_run_ms=%.1f)",
+                len(added_segments),
+                sorted({seg.label for seg in added_segments}),
+                fallback_min_run,
+            )
+        else:
+            LOGGER.warning(
+                "Fallback pass did not recover segments for labels %s",
+                sorted(coverage_labels),
+            )
+
     # Log segment statistics
     labeled_segments = [s for s in segments if s.label and s.label != "UNKNOWN"]
     unlabeled_segments = [s for s in segments if not s.label or s.label == "UNKNOWN"]
@@ -520,7 +595,6 @@ def main() -> None:
         LOGGER.info("Segments by label: %s", label_counts)
     
     totals_df = aggregate.segments_to_totals(segments)
-    video_duration_ms = (frame_idx + 1) / fps * 1000.0 if frame_idx >= 0 else 0.0
     timeline_df = aggregate.segments_to_timeline(segments, fps, video_duration_ms)
     track_timeline_df = aggregate.segments_to_track_timeline(segments, video_duration_ms)
 

@@ -1,0 +1,54 @@
+# PERMISSIVE CONFIGURATION - Maximum face capture
+# Use this for first-time harvest or when building initial facebank
+# This config prioritizes recall over precision - captures everything possible
+
+# Frame sampling & detection - MAXIMUM COVERAGE
+stride: 1                         # process every frame
+det_size: [960, 960]              # RetinaFace detection resolution (w, h)
+face_conf_th: 0.25                # very low threshold - catch even uncertain faces
+person_conf_th: 0.10              # very low threshold - track all possible persons
+face_in_track_iou: 0.03           # minimal overlap required
+allow_face_center: false          # disabled to avoid attaching wrong face within same box
+dilate_track_px: 0.30             # maximum dilation to capture heads
+temporal_iou_tolerance: 5         # look back ±5 frames for association
+
+# Harvest sampling - MAXIMUM PERMISSIVENESS
+samples_per_track: 16             # capture more samples per track
+samples_min: 4                    # lower minimum
+samples_max: 20                   # higher maximum
+min_gap_frames: 6                 # allow closer sample spacing
+min_area_frac: 0.001              # allow very small faces (~20x20px at 1080p)
+min_area_px: null                 
+min_sharpness_laplacian: 20.0     # very low sharpness requirement
+sharpness_pctile: 5               # only reject worst 5%
+min_frontalness: 0.10             # accept extreme profile views
+frontal_pctile: null              # disable frontal preference
+min_frontal_picks: 0              # don't require frontal faces
+profile_asymmetry_thresh: 0.45    # very relaxed
+quality_weights: [0.6, 0.1, 0.3]  # prioritize sharpness and area over frontalness
+target_area_frac: 0.02            
+debug_rejections: true            # enable for visibility
+multi_face_per_track_guard: true
+multi_face_tiebreak: quality
+fallback_head_pct: 0.4
+
+# Identity purity guard - RELAXED
+identity_guard: true
+identity_sim_threshold: 0.55      # lowered from 0.62 - allow more variation
+identity_min_picks: 2             # lowered from 3
+reindex_harvest_tracks: true
+
+# Track gap handling
+max_gap_ms: 300
+min_run_ms: 600
+
+# Identity voting & persistence
+similarity_th: 0.78
+vote_decay: 0.99
+flip_tolerance: 0.30
+
+# Identity change detection and splitting
+identity_split_min_frames: 5      
+identity_change_margin: 0.05      
+identity_split_enabled: true      
+embed_every_n: 2
