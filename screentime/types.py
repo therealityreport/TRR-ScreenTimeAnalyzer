@@ -29,6 +29,32 @@ class Detection:
 
 
 @dataclass
+class Subtrack:
+    """A contiguous window of a track with a stable identity assignment."""
+
+    start_frame: int
+    end_frame: int
+    label: Optional[str]
+    frame_scores: Dict[int, float] = field(default_factory=dict)
+
+    @property
+    def labeled_frames(self) -> List[int]:
+        return sorted(self.frame_scores.keys())
+
+    @property
+    def avg_similarity(self) -> float:
+        if not self.frame_scores:
+            return float("nan")
+        return float(np.mean(list(self.frame_scores.values())))
+
+    @property
+    def duration_frames(self) -> int:
+        if self.end_frame < self.start_frame:
+            return 0
+        return (self.end_frame - self.start_frame) + 1
+
+
+@dataclass
 class TrackState:
     """Represents the evolving state of a person track."""
 
@@ -38,8 +64,19 @@ class TrackState:
     scores: List[float] = field(default_factory=list)
     timestamps_ms: List[float] = field(default_factory=list)
     label: Optional[str] = None
-    label_scores: Dict[str, float] = field(default_factory=dict)
+    label_votes: Dict[str, float] = field(default_factory=dict)
+    label_scores: Dict[int, Tuple[str, float]] = field(default_factory=dict)
     active: bool = True
+    # Identity splitting state
+    subtracks: List[Subtrack] = field(default_factory=list)
+    current_subtrack_label: Optional[str] = None
+    current_subtrack_start_frame: Optional[int] = None
+    label_change_candidate: Optional[str] = None
+    label_change_streak: int = 0
+    # Track face match events: {frame_idx: (label, similarity)}
+    face_matches: Dict[int, Tuple[str, float]] = field(default_factory=dict)
+    # Last frame index where an embedding was computed for this track
+    last_embed_frame: int = -10**9
 
     def add_observation(
         self,
@@ -72,7 +109,18 @@ class TrackState:
         return float(np.mean(self.scores)) if self.scores else 0.0
 
     def record_vote(self, label: str, weight: float) -> None:
-        self.label_scores[label] = self.label_scores.get(label, 0.0) + weight
+        self.label_votes[label] = self.label_votes.get(label, 0.0) + weight
+
+    def add_label(self, frame_idx: int, label: str, score: Optional[float]) -> None:
+        """Persist a per-frame label assignment for downstream aggregation."""
+        if not label or label == "UNKNOWN":
+            return
+        self.label_scores[frame_idx] = (label, 0.0 if score is None else float(score))
+
+    @property
+    def byte_track_id(self) -> int:
+        """Alias for track_id to maintain consistency across codebase."""
+        return self.track_id
 
 
 @dataclass
@@ -97,6 +145,10 @@ class FaceSample:
     byte_track_id: Optional[int] = None  # source ByteTrack id
     # Embedding is used transiently during harvesting for identity purity; not serialized
     embedding: Optional[np.ndarray] = None
+    image: Optional[np.ndarray] = None  # cached aligned image (not serialized)
+    provider: Optional[str] = None
+    identity_cosine: Optional[float] = None
+    similarity_to_centroid: Optional[float] = None
 
 
 @dataclass
@@ -139,6 +191,9 @@ class ManifestEntry:
                     "person_bbox": s.person_bbox,
                     "association_iou": s.association_iou,
                     "match_mode": s.match_mode,
+                    "identity_cosine": s.identity_cosine,
+                    "similarity_to_centroid": s.similarity_to_centroid,
+                    "provider": s.provider,
                 }
                 for s in self.samples
             ],

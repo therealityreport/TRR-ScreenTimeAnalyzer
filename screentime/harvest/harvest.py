@@ -26,22 +26,25 @@ LOGGER = logging.getLogger("screentime.harvest")
 @dataclass
 class HarvestConfig:
     stride: int = 1
-    samples_min: int = 4
+    samples_min: int = 6
     samples_max: int = 12
     samples_per_track: int = 8
     min_gap_frames: int = 8
     min_area_frac: float = 0.005
     min_area_px: Optional[float] = None
     min_sharpness_laplacian: Optional[float] = None
-    min_sharpness_pct: Optional[float] = 40.0
+    min_sharpness_pct: Optional[float] = None
+    sharpness_pctile: Optional[float] = 40.0
     min_frontalness: float = 0.35
-    face_in_track_iou: float = 0.20
+    frontal_pctile: Optional[float] = 50.0
+    min_frontal_picks: int = 2
+    face_in_track_iou: float = 0.25
     allow_face_center: bool = False
-    dilate_track_px: float = 0.15
+    dilate_track_px: float = 0.07
     temporal_iou_tolerance: int = 1
-    profile_asymmetry_thresh: float = 0.25
-    quality_weights: Tuple[float, float, float] = (0.35, 0.45, 0.20)
-    target_area_frac: float = 0.06
+    profile_asymmetry_thresh: float = 0.35
+    quality_weights: Tuple[float, float, float] = (0.5, 0.3, 0.2)
+    target_area_frac: float = 0.02
     debug_rejections: bool = False
     multi_face_per_track_guard: bool = True
     multi_face_tiebreak: str = "quality"
@@ -50,9 +53,10 @@ class HarvestConfig:
     identity_guard: bool = True
     identity_split: bool = True
     identity_sim_threshold: float = 0.62
-    identity_min_picks: int = 2
+    identity_min_picks: int = 3
     # Reindex harvest folders independent of ByteTrack ids
     reindex_harvest_tracks: bool = True
+    fast_mode: bool = False
 
 
 @dataclass
@@ -125,10 +129,11 @@ class TrackSamplingState:
         selected: List[SampleCandidate] = []
 
         sharp_thresholds: List[float] = []
-        if config.min_sharpness_pct is not None and sorted_candidates:
-            sharp_thresholds.append(
-                float(np.percentile([cand.sharpness for cand in sorted_candidates], config.min_sharpness_pct))
-            )
+        pct_setting = config.sharpness_pctile
+        if pct_setting is None:
+            pct_setting = config.min_sharpness_pct
+        if pct_setting is not None and sorted_candidates:
+            sharp_thresholds.append(float(np.percentile([cand.sharpness for cand in sorted_candidates], pct_setting)))
         if config.min_sharpness_laplacian is not None:
             sharp_thresholds.append(float(config.min_sharpness_laplacian))
         sharp_gate = max(sharp_thresholds) if sharp_thresholds else None
@@ -167,19 +172,39 @@ class TrackSamplingState:
                 if len(selected) >= min(config.samples_min, required):
                     break
 
-        high_frontal_candidates = [cand for cand in eligible_candidates if cand.frontalness >= 0.5]
-        if high_frontal_candidates:
-            high_best = max(high_frontal_candidates, key=lambda c: c.quality)
-            if not high_best.picked:
+        frontal_threshold: Optional[float] = None
+        if config.frontal_pctile is not None and eligible_candidates:
+            frontal_threshold = float(
+                np.percentile([cand.frontalness for cand in eligible_candidates], config.frontal_pctile)
+            )
+
+        if frontal_threshold is not None and config.min_frontal_picks > 0:
+            frontal_pool = [cand for cand in eligible_candidates if cand.frontalness >= frontal_threshold]
+            frontal_pool.sort(key=lambda c: c.quality, reverse=True)
+            selected.sort(key=lambda c: c.quality, reverse=True)
+            for cand in frontal_pool:
+                if sum(1 for s in selected if s.frontalness >= frontal_threshold) >= config.min_frontal_picks:
+                    break
+                if cand in selected:
+                    continue
                 if len(selected) >= config.samples_per_track:
-                    worst = min(selected, key=lambda c: c.quality)
-                    if worst is not high_best:
-                        worst.picked = False
-                        worst.reason = worst.reason or "not_selected"
-                        selected.remove(worst)
-                high_best.picked = True
-                high_best.reason = "picked"
-                selected.append(high_best)
+                    # replace lowest quality candidate that does not meet threshold
+                    replace_target = None
+                    for existing in reversed(sorted(selected, key=lambda c: c.quality)):
+                        if existing.frontalness < frontal_threshold:
+                            replace_target = existing
+                            break
+                    if replace_target is None:
+                        continue
+                    replace_target.picked = False
+                    replace_target.reason = replace_target.reason or "not_selected"
+                    selected.remove(replace_target)
+                cand.picked = True
+                cand.reason = "picked"
+                selected.append(cand)
+
+        # ensure ordering back to original quality sort
+        selected.sort(key=lambda c: c.sample.frame_idx)
 
         for candidate in eligible_candidates:
             if not candidate.picked and candidate.reason is None:
@@ -204,6 +229,9 @@ class TrackSamplingState:
                 "association_iou": candidate.sample.association_iou,
                 "match_mode": candidate.sample.match_mode,
                 "frame_offset": candidate.sample.match_frame_offset,
+                "identity_cosine": candidate.sample.identity_cosine,
+                "similarity_to_centroid": candidate.sample.similarity_to_centroid,
+                "provider": candidate.sample.provider,
             }
 
 
@@ -256,12 +284,16 @@ class HarvestRunner:
         reject_counter: Counter[str] = Counter()
         frame_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         candidate_event_lookup: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        debug_write_queue: List[Tuple[np.ndarray, Path]] = []
 
-        # Harvest track namespace and identity guard state
+        # Identity guard state
+        guard_centroid: Dict[int, np.ndarray] = {}
+        guard_count: Dict[int, int] = {}
+        split_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+
+        # Harvest track namespace mapping
         next_harvest_id = 1
         byte_to_harvest: Dict[int, int] = {}
-        harvest_centroid: Dict[int, np.ndarray] = {}
-        harvest_count: Dict[int, int] = {}
         harvest_source_byte: Dict[int, int] = {}
 
         def _new_harvest_id() -> int:
@@ -349,27 +381,10 @@ class HarvestRunner:
             candidate_event_lookup[(track_id, frame_idx)] = event
             return event
 
-        def manage_sample_file(sample: FaceSample, reason: str, event: Optional[Dict[str, Any]] = None) -> None:
-            if not sample.path:
+        def queue_debug_image(image: Optional[np.ndarray], path: Path) -> None:
+            if not self.config.debug_rejections or image is None:
                 return
-            path = Path(sample.path)
-            try:
-                if self.config.debug_rejections:
-                    debug_dir = ensure_dir(path.parent / "debug")
-                    target = debug_dir / path.name
-                    if path != target:
-                        if target.exists():
-                            target.unlink()
-                        path.replace(target)
-                        sample.path = target
-                        if event is not None:
-                            event["path"] = str(target)
-                else:
-                    path.unlink(missing_ok=True)
-                    if event is not None:
-                        event["path"] = None
-            except OSError as exc:  # pragma: no cover - defensive
-                LOGGER.warning("Failed to manage sample file %s (%s): %s", path, reason, exc)
+            debug_write_queue.append((image.copy(), path))
 
         while True:
             ret, frame = cap.read()
@@ -529,11 +544,26 @@ class HarvestRunner:
                     },
                 )
 
-            for track_id, assignment in assignments.items():
+            for byte_id, assignment in assignments.items():
+                hid = byte_to_harvest.get(byte_id)
+                if hid is None:
+                    hid = _new_harvest_id()
+                    byte_to_harvest[byte_id] = hid
+                    harvest_source_byte[hid] = byte_id
+                else:
+                    harvest_source_byte.setdefault(hid, byte_id)
+
                 face = face_dets[assignment.face_idx]
+                harvest_dirname = (
+                    f"track_{hid:04d}" if self.config.reindex_harvest_tracks else f"track_{byte_id:04d}"
+                )
+                sample_filename = f"{video_stem}_f{frame_idx:06d}.jpg"
+                sample_path = crops_dir / harvest_dirname / sample_filename
+                debug_path = crops_dir / harvest_dirname / "debug" / sample_filename
+
                 if not self._passes_area_threshold(face.bbox, frame_area):
                     record_reject(
-                        track_id,
+                        hid,
                         "rejected_area",
                         frame_idx,
                         {
@@ -541,67 +571,44 @@ class HarvestRunner:
                             "frame_area": frame_area,
                             "face_bbox": list(map(float, face.bbox)),
                             "person_bbox": list(map(float, assignment.person_bbox)),
+                            "byte_track_id": byte_id,
                         },
                     )
                     continue
 
                 aligned = self.face_detector.align_to_112(frame, face.landmarks, face.bbox)
                 sharpness = self._compute_sharpness(aligned)
-
-                # Identity embedding and harvest id mapping
-                embedding = None
-                try:
-                    if self.embedder is not None:
-                        embedding = self.embedder.embed(aligned)
-                except Exception:
-                    embedding = None
-
-                byte_id = track_id
-                hid = byte_to_harvest.get(byte_id)
-                if hid is None:
-                    hid = _new_harvest_id()
-                    byte_to_harvest[byte_id] = hid
-                    harvest_source_byte[hid] = byte_id
-
-                if self.config.identity_guard and embedding is not None:
-                    if harvest_count.get(hid, 0) >= self.config.identity_min_picks:
-                        sim = _cosine(embedding, harvest_centroid[hid])
-                        if sim < self.config.identity_sim_threshold:
-                            if self.config.identity_split:
-                                prev_hid = hid
-                                hid = _new_harvest_id()
-                                byte_to_harvest[byte_id] = hid
-                                harvest_source_byte[hid] = byte_id
-                                frame_events[frame_idx].append(
-                                    {
-                                        "frame": frame_idx,
-                                        "event": "identity_split",
-                                        "track_id": hid,
-                                        "byte_track_id": byte_id,
-                                        "prev_harvest_id": prev_hid,
-                                        "cosine_sim": float(sim),
-                                    }
-                                )
-                            else:
-                                record_reject(
-                                    byte_id,
-                                    "rejected_identity_purity",
-                                    frame_idx,
-                                    {"harvest_id": hid, "cosine_sim": float(sim)},
-                                )
-                                continue
-
-                harvest_dirname = (
-                    f"track_{hid:04d}" if self.config.reindex_harvest_tracks else f"track_{byte_id:04d}"
-                )
-                track_dir = ensure_dir(crops_dir / harvest_dirname)
-                sample_path = track_dir / f"{video_stem}_f{frame_idx:06d}.jpg"
-                cv2.imwrite(str(sample_path), aligned)
-
                 area = bbox_area(face.bbox)
                 area_frac = area / frame_area if frame_area else 0.0
                 orientation, frontalness = self._orientation_metrics(face.landmarks)
                 quality = self._score_quality(sharpness, frontalness, area_frac)
+
+                if frontalness < self.config.min_frontalness:
+                    record_reject(
+                        hid,
+                        "rejected_frontalness",
+                        frame_idx,
+                        {
+                            "frontalness": float(frontalness),
+                            "min_frontalness": float(self.config.min_frontalness),
+                            "byte_track_id": byte_id,
+                        },
+                    )
+                    queue_debug_image(aligned, debug_path)
+                    continue
+
+                if not self._passes_sharpness_threshold(sharpness):
+                    record_reject(
+                        hid,
+                        "rejected_sharpness",
+                        frame_idx,
+                        {
+                            "sharpness": float(sharpness),
+                            "byte_track_id": byte_id,
+                        },
+                    )
+                    queue_debug_image(aligned, debug_path)
+                    continue
 
                 face_sample = FaceSample(
                     track_id=hid,
@@ -620,25 +627,81 @@ class HarvestRunner:
                     association_iou=float(assignment.overlap),
                     match_mode=assignment.mode,
                     match_frame_offset=assignment.frame_offset,
-                    embedding=embedding if embedding is not None else None,
+                    image=aligned,
                 )
 
-                if not self._passes_sharpness_threshold(sharpness):
-                    record_reject(
-                        track_id,
-                        "rejected_sharpness",
-                        frame_idx,
-                        {
-                            "sharpness": float(sharpness),
-                            "face_bbox": list(map(float, face.bbox)),
-                            "person_bbox": list(map(float, assignment.person_bbox)),
-                        },
-                    )
-                    manage_sample_file(face_sample, "rejected_sharpness")
-                    continue
+                embedding = None
+                embed_provider = None
+                try:
+                    if self.embedder is not None:
+                        embedding = self.embedder.embed(aligned)
+                        embed_provider = getattr(self.embedder, "backend", None)
+                        if not embed_provider and hasattr(self.embedder, "providers"):
+                            providers = list(getattr(self.embedder, "providers"))
+                            embed_provider = providers[0] if providers else None
+                except Exception as exc:  # pragma: no cover - defensive runtime guard
+                    LOGGER.warning("Embedding failed for track %s frame %s: %s", hid, frame_idx, exc)
+                    embedding = None
+                face_sample.embedding = embedding
+                face_sample.provider = embed_provider
+
+                need_guard_update = embedding is not None
+                sim = None
+                if (
+                    self.config.identity_guard
+                    and embedding is not None
+                    and guard_count.get(hid, 0) >= self.config.identity_min_picks
+                ):
+                    centroid = guard_centroid.get(hid)
+                    if centroid is not None:
+                        sim = _cosine(embedding, centroid)
+                        face_sample.identity_cosine = sim
+                        if sim < self.config.identity_sim_threshold:
+                            if self.config.identity_split:
+                                prev_hid = hid
+                                hid = _new_harvest_id()
+                                byte_to_harvest[byte_id] = hid
+                                harvest_source_byte[hid] = byte_id
+                                harvest_dirname = (
+                                    f"track_{hid:04d}"
+                                    if self.config.reindex_harvest_tracks
+                                    else f"track_{byte_id:04d}"
+                                )
+                                sample_path = crops_dir / harvest_dirname / sample_filename
+                                debug_path = crops_dir / harvest_dirname / "debug" / sample_filename
+                                face_sample.track_id = hid
+                                face_sample.path = sample_path
+                                face_sample.identity_cosine = sim
+                                guard_centroid[hid] = embedding.copy()
+                                guard_count[hid] = 1
+                                need_guard_update = False
+                                payload = {
+                                    "event": "identity_split",
+                                    "track_id": hid,
+                                    "byte_track_id": byte_id,
+                                    "prev_harvest_id": prev_hid,
+                                    "cosine_sim": float(sim),
+                                }
+                                log_frame_event(frame_idx, payload)
+                                split_events[byte_id].append({"frame": frame_idx, **payload})
+                            else:
+                                record_reject(
+                                    hid,
+                                    "rejected_identity_purity",
+                                    frame_idx,
+                                    {
+                                        "byte_track_id": byte_id,
+                                        "cosine_sim": float(sim),
+                                        "threshold": self.config.identity_sim_threshold,
+                                    },
+                                )
+                                queue_debug_image(aligned, debug_path)
+                                continue
+                else:
+                    face_sample.identity_cosine = sim
 
                 record_candidate_event(
-                    hid,
+                    face_sample.track_id,
                     frame_idx,
                     {
                         "reason": "candidate",
@@ -652,11 +715,13 @@ class HarvestRunner:
                         "area_frac": float(area_frac),
                         "match_mode": assignment.mode,
                         "frame_offset": int(assignment.frame_offset),
-                        "path": str(sample_path),
+                        "path": str(face_sample.path),
+                        "identity_cosine": face_sample.identity_cosine,
+                        "provider": embed_provider,
                     },
                 )
-                
-                sampling_state = sampling_states.setdefault(hid, TrackSamplingState())
+
+                sampling_state = sampling_states.setdefault(face_sample.track_id, TrackSamplingState())
                 removed = sampling_state.add_candidate(
                     face_sample,
                     quality,
@@ -682,17 +747,21 @@ class HarvestRunner:
                             "person_bbox": list(map(float, removed.person_bbox)),
                         },
                     )
-                    manage_sample_file(removed, "rejected_quality", removed_event)
+                    if removed.image is not None:
+                        debug_removed_dir = removed.path.parent / "debug"
+                        debug_removed_path = debug_removed_dir / removed.path.name
+                        queue_debug_image(removed.image, debug_removed_path)
+                        removed.image = None
 
-                # Provisional centroid update to enable on-the-fly identity guard decisions
-                if face_sample.embedding is not None:
-                    if hid not in harvest_centroid:
-                        harvest_centroid[hid] = face_sample.embedding.copy()
-                        harvest_count[hid] = 1
+                if need_guard_update and embedding is not None:
+                    centroid = guard_centroid.get(face_sample.track_id)
+                    if centroid is None:
+                        guard_centroid[face_sample.track_id] = embedding.copy()
+                        guard_count[face_sample.track_id] = 1
                     else:
-                        n = harvest_count.get(hid, 0)
-                        harvest_centroid[hid] = (harvest_centroid[hid] * n + face_sample.embedding) / (n + 1)
-                        harvest_count[hid] = n + 1
+                        n = guard_count.get(face_sample.track_id, 0)
+                        guard_centroid[face_sample.track_id] = (centroid * n + embedding) / (n + 1)
+                        guard_count[face_sample.track_id] = n + 1
 
             log_progress(frames_seen)
             last_frames_seen = frames_seen
@@ -723,7 +792,12 @@ class HarvestRunner:
                 if candidate.reason and candidate.reason.startswith("rejected_"):
                     reject_counter[candidate.reason] += 1
                 if not candidate.picked:
-                    manage_sample_file(candidate.sample, candidate.reason or "not_selected", event)
+                    if event is not None:
+                        event["path"] = None
+                    if self.config.debug_rejections:
+                        debug_path = candidate.sample.path.parent / "debug" / candidate.sample.path.name
+                        queue_debug_image(candidate.sample.image, debug_path)
+                    candidate.sample.image = None
                 else:
                     if event is not None:
                         event["path"] = str(candidate.sample.path)
@@ -734,18 +808,50 @@ class HarvestRunner:
         for hid, state in sampling_states.items():
             candidate_rows.extend(state.iter_debug_rows(hid))
 
-        # Update identity centroids using picked samples only
-        for hid, selected in selection_map.items():
-            for s in selected:
-                if s.embedding is None:
-                    continue
-                if hid not in harvest_centroid:
-                    harvest_centroid[hid] = s.embedding.copy()
-                    harvest_count[hid] = 1
-                else:
-                    n = harvest_count[hid]
-                    harvest_centroid[hid] = (harvest_centroid[hid] * n + s.embedding) / (n + 1)
-                    harvest_count[hid] = n + 1
+        # Persist selected samples and compute track-level similarities
+        total_selected = 0
+        for hid, samples in selection_map.items():
+            if not samples:
+                continue
+            byte_id = harvest_source_byte.get(hid)
+            harvest_dirname = f"track_{hid:04d}" if self.config.reindex_harvest_tracks else (
+                f"track_{byte_id:04d}" if byte_id is not None else f"track_{hid:04d}"
+            )
+            track_dir = ensure_dir(crops_dir / harvest_dirname)
+
+            embeddings: List[np.ndarray] = []
+            for sample in samples:
+                if sample.embedding is None and self.embedder is not None and sample.image is not None:
+                    try:
+                        sample.embedding = self.embedder.embed(sample.image)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        LOGGER.warning("Post-filter embedding failed for track %s frame %s: %s", hid, sample.frame_idx, exc)
+                        sample.embedding = None
+                if sample.embedding is not None:
+                    embeddings.append(sample.embedding)
+
+            centroid: Optional[np.ndarray] = None
+            if embeddings:
+                centroid = np.mean(np.stack(embeddings, axis=0), axis=0)
+                norm = float(np.linalg.norm(centroid)) + 1e-9
+                centroid = centroid / norm
+
+            for sample in samples:
+                if centroid is not None and sample.embedding is not None:
+                    sample.similarity_to_centroid = _cosine(sample.embedding, centroid)
+                target_dir = ensure_dir(sample.path.parent)
+                if sample.image is not None:
+                    cv2.imwrite(str(sample.path), sample.image)
+                    sample.image = None
+
+            total_selected += len(samples)
+
+        # Flush queued debug writes (rejections, non-selected)
+        if self.config.debug_rejections and debug_write_queue:
+            for image, path in debug_write_queue:
+                ensure_dir(path.parent)
+                cv2.imwrite(str(path), image)
+            debug_write_queue.clear()
 
         # Build manifest per harvest id, carrying source ByteTrack id
         track_by_id: Dict[int, TrackState] = {t.track_id: t for t in finished_tracks}
@@ -784,6 +890,9 @@ class HarvestRunner:
                 "association_iou",
                 "match_mode",
                 "frame_offset",
+                "identity_cosine",
+                "similarity_to_centroid",
+                "provider",
             ]
             with selected_csv.open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
@@ -799,13 +908,17 @@ class HarvestRunner:
             }
             if debug_records:
                 payload["reject_details"] = {k: v for k, v in debug_records.items()}
+            if split_events:
+                payload["identity_splits"] = {
+                    str(byte_id): events for byte_id, events in split_events.items()
+                }
             dump_json(debug_path, payload)
             LOGGER.info("Harvest debug log written to %s", debug_path)
 
         LOGGER.info(
             "Harvest complete tracks=%d samples=%d manifest=%s",
             len(manifest_entries),
-            sum(len(entry.samples) for entry in manifest_entries),
+            total_selected,
             manifest_path,
         )
         return manifest_path
@@ -822,27 +935,6 @@ class HarvestRunner:
         if self.config.min_sharpness_laplacian is None:
             return True
         return sharpness >= self.config.min_sharpness_laplacian
-
-    def _build_manifest(
-        self,
-        tracks: List[TrackState],
-        selection_map: Dict[int, List[FaceSample]],
-    ) -> List[ManifestEntry]:
-        manifest: List[ManifestEntry] = []
-        for track in tracks:
-            samples = selection_map.get(track.track_id, [])
-            entry = ManifestEntry(
-                track_id=track.track_id,
-                total_frames=track.duration_frames,
-                avg_conf=track.avg_score,
-                avg_area=float(np.mean([bbox_area(b) for b in track.bboxes])) if track.bboxes else 0.0,
-                first_ts_ms=track.timestamps_ms[0] if track.timestamps_ms else 0.0,
-                last_ts_ms=track.timestamps_ms[-1] if track.timestamps_ms else 0.0,
-                samples=samples,
-            )
-            manifest.append(entry)
-
-        return manifest
 
     def _best_iou_track(
         self,

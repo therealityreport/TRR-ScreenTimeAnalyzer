@@ -47,6 +47,8 @@ def render_overlay(
     fps: Optional[float] = None,
     start_frame: int = 0,
     end_frame: Optional[int] = None,
+    highlight_track: Optional[int] = None,
+    labels_only: bool = False,
 ) -> None:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -72,7 +74,12 @@ def render_overlay(
             break
         overlay = overlays.get(frame_idx)
         if overlay:
-            frame = _draw_boxes(frame, overlay.boxes)
+            frame = _draw_boxes(
+                frame,
+                overlay.boxes,
+                highlight_track=highlight_track,
+                labels_only=labels_only,
+            )
         writer.write(frame)
         frame_idx += 1
 
@@ -81,14 +88,25 @@ def render_overlay(
     LOGGER.info("Overlay written to %s", output_path)
 
 
-def _draw_boxes(frame, boxes: Iterable[OverlayBox]):
+def _draw_boxes(
+    frame,
+    boxes: Iterable[OverlayBox],
+    highlight_track: Optional[int] = None,
+    labels_only: bool = False,
+):
     for box in boxes:
         x1, y1, x2, y2 = map(int, box.bbox)
-        color = box.color or _label_color(box.label)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        base_color = box.color or _label_color(box.label)
+        is_highlight = highlight_track is not None and box.track_id == highlight_track
+        color = (0, 0, 255) if is_highlight else base_color
+        thickness = 4 if is_highlight else 2
         label = box.label or "unknown"
         if box.score is not None:
             label = f"{label} ({box.score:.2f})"
+        if is_highlight:
+            label = f"*{label}*"
+        if not labels_only:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
         text_y = max(15, y1 - 10)
         cv2.putText(frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         metrics = []

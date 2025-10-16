@@ -126,6 +126,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override temporal tolerance (+/- frames) when matching face to track",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Enable fast mode (stride=2, 640 detector, no debug rejects)",
+    )
     return parser.parse_args()
 
 
@@ -140,6 +145,9 @@ def main() -> None:
     face_conf = args.face_det_threshold or pipeline_cfg.get("face_conf_th", 0.45)
     person_conf = args.person_conf or pipeline_cfg.get("person_conf_th", 0.20)
 
+    if args.fast and args.retina_det_size is None:
+        det_size = (640, 640)
+
     person_detector = YOLOPersonDetector(
         weights=args.person_weights,
         conf_thres=person_conf,
@@ -147,26 +155,34 @@ def main() -> None:
     face_detector = RetinaFaceDetector(det_size=det_size, det_thresh=face_conf)
     tracker = ByteTrackWrapper(**tracker_cfg)
 
-    quality_weights_cfg = args.quality_weights or pipeline_cfg.get("quality_weights", (0.70, 0.20, 0.10))
+    quality_weights_cfg = args.quality_weights or pipeline_cfg.get("quality_weights", (0.5, 0.3, 0.2))
     quality_weights = tuple(float(x) for x in quality_weights_cfg)
-    target_area_frac = args.target_area_frac or float(pipeline_cfg.get("target_area_frac", 0.06))
+    target_area_frac = args.target_area_frac or float(pipeline_cfg.get("target_area_frac", 0.02))
     min_sharpness = args.min_sharpness_laplacian
     if min_sharpness is None:
         cfg_min_sharpness = pipeline_cfg.get("min_sharpness_laplacian")
         min_sharpness = float(cfg_min_sharpness) if cfg_min_sharpness is not None else None
-    face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.20))
+    face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
     min_frontalness = args.min_frontalness or float(pipeline_cfg.get("min_frontalness", 0.35))
+    sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
+    if sharpness_pctile is None:
+        legacy_pct = pipeline_cfg.get("min_sharpness_pct")
+        sharpness_pctile = float(legacy_pct) if legacy_pct is not None else None
     min_sharpness_pct = args.min_sharpness_pct
-    if min_sharpness_pct is None:
+    if min_sharpness_pct is None and sharpness_pctile is None:
         cfg_pct = pipeline_cfg.get("min_sharpness_pct")
         min_sharpness_pct = float(cfg_pct) if cfg_pct is not None else None
-    dilate_track_px = args.dilate_track_px or float(pipeline_cfg.get("dilate_track_px", 0.15))
+    dilate_track_px = args.dilate_track_px or float(pipeline_cfg.get("dilate_track_px", 0.07))
     temporal_iou_tolerance = args.temporal_iou_tolerance or int(pipeline_cfg.get("temporal_iou_tolerance", 1))
     min_area_frac = float(pipeline_cfg.get("min_area_frac", 0.005))
     if hasattr(args, "min_area_frac") and args.min_area_frac is not None:  # future-proof
         min_area_frac = args.min_area_frac
+    frontal_pctile = pipeline_cfg.get("frontal_pctile")
+    if frontal_pctile is not None:
+        frontal_pctile = float(frontal_pctile)
+    min_frontal_picks = int(pipeline_cfg.get("min_frontal_picks", 2))
 
     harvest_config = HarvestConfig(
         stride=pipeline_cfg.get("stride", 1),
@@ -178,7 +194,10 @@ def main() -> None:
         min_area_px=pipeline_cfg.get("min_area_px"),
         min_sharpness_laplacian=min_sharpness,
         min_sharpness_pct=min_sharpness_pct,
+        sharpness_pctile=sharpness_pctile,
         min_frontalness=min_frontalness,
+        frontal_pctile=frontal_pctile,
+        min_frontal_picks=min_frontal_picks,
         face_in_track_iou=face_in_track_iou,
         allow_face_center=bool(pipeline_cfg.get("allow_face_center", False)),
         dilate_track_px=dilate_track_px,
@@ -193,9 +212,15 @@ def main() -> None:
         identity_guard=bool(pipeline_cfg.get("identity_guard", True)),
         identity_split=bool(pipeline_cfg.get("identity_split", True)),
         identity_sim_threshold=float(pipeline_cfg.get("identity_sim_threshold", 0.62)),
-        identity_min_picks=int(pipeline_cfg.get("identity_min_picks", 2)),
+        identity_min_picks=int(pipeline_cfg.get("identity_min_picks", 3)),
         reindex_harvest_tracks=bool(pipeline_cfg.get("reindex_harvest_tracks", True)),
+        fast_mode=args.fast,
     )
+
+    if args.fast:
+        harvest_config.stride = max(2, harvest_config.stride)
+        harvest_config.debug_rejections = False
+
 
     runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
     ensure_dir(args.output_dir)

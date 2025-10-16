@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import platform
 from typing import List, Optional, Tuple
 
 import cv2
@@ -11,6 +13,15 @@ import numpy as np
 from screentime.types import BBox, Detection
 
 LOGGER = logging.getLogger("screentime.detectors.face")
+
+
+def _default_providers() -> Tuple[str, ...]:
+    """Choose default ONNX providers for RetinaFace."""
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin" and machine in {"arm64", "aarch64"}:
+        return ("CoreMLExecutionProvider", "CPUExecutionProvider")
+    return ("CPUExecutionProvider",)
 
 
 class RetinaFaceDetector:
@@ -22,6 +33,9 @@ class RetinaFaceDetector:
         det_size: Tuple[int, int] = (960, 960),
         det_thresh: float = 0.45,
     ) -> None:
+        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("MKL_NUM_THREADS", "2")
+        os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "2")
         try:
             from insightface.app import FaceAnalysis
         except ImportError as exc:  # pragma: no cover - import guard
@@ -32,14 +46,28 @@ class RetinaFaceDetector:
 
         self.det_size = det_size
         self.det_thresh = det_thresh
-        self.app = FaceAnalysis(allowed_modules=["detection"])
-        ctx_id = 0  # auto GPU if available
+        provider_list: Tuple[str, ...]
+        if providers is None:
+            provider_list = _default_providers()
+        else:
+            provider_list = tuple(providers)
+        self.providers = provider_list
+        self.app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=list(provider_list))
+        ctx_id = 0  # auto GPU/CoreML if available
         self.app.prepare(ctx_id=ctx_id, det_size=self.det_size)
+        backend = None
+        try:
+            detection_model = self.app.models.get("detection")
+            if detection_model is not None and hasattr(detection_model, "session"):
+                backend = detection_model.session.get_providers()[0]
+        except Exception:  # pragma: no cover - optional logging
+            backend = None
         LOGGER.info(
-            "Loaded RetinaFace detector det_size=%s det_thresh=%.2f providers=%s",
+            "Loaded RetinaFace detector det_size=%s det_thresh=%.2f providers=%s backend=%s",
             det_size,
             det_thresh,
-            providers or ("auto",),
+            provider_list,
+            backend,
         )
 
     def detect(self, image: np.ndarray, frame_idx: int) -> List[Detection]:

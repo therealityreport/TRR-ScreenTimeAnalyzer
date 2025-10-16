@@ -118,3 +118,38 @@ def test_sharpness_percentile_gate():
     assert exported[0].frame_idx == 10
     reasons = {cand.sample.frame_idx: cand.reason for cand in state.candidates}
     assert reasons[0] == "rejected_sharpness"
+
+
+def test_export_samples_ensures_frontal_quota():
+    config = HarvestConfig(
+        samples_per_track=4,
+        samples_min=4,
+        min_frontalness=0.1,
+        frontal_pctile=50.0,
+        min_frontal_picks=2,
+    )
+    state = TrackSamplingState()
+
+    def add_candidate(frame_idx: int, frontal: float, quality: float) -> None:
+        sample = FaceSample(
+            track_id=1,
+            frame_idx=frame_idx,
+            timestamp_ms=frame_idx * 40.0,
+            path=Path(f"/tmp/sample_{frame_idx}.jpg"),
+            score=0.9,
+            bbox=(0, 0, 10, 10),
+            sharpness=200.0,
+            frontalness=frontal,
+            quality=quality,
+        )
+        state.add_candidate(sample, quality, 200.0, frontal, config.target_area_frac, "frontal", config)
+
+    add_candidate(0, 0.9, 0.95)
+    add_candidate(10, 0.8, 0.9)
+    add_candidate(20, 0.3, 0.85)
+    add_candidate(30, 0.2, 0.80)
+    add_candidate(40, 0.15, 0.70)
+
+    selected = state.export_samples(config)
+    assert len(selected) == 4
+    assert sum(1 for sample in selected if sample.frontalness >= 0.3) >= config.min_frontal_picks

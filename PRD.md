@@ -1,5 +1,5 @@
 ## 1 Overview and Goals
-The **Screen Time Analyzer** is a system designed to measure the on‑screen presence of cast members in episodic video content (e.g. reality TV shows).  Its goals are:
+The **Screen Time Analyzer** is a system designed to measure the on‑screen presence of cast members in episodic video content (e.g. reality TV shows). Its goals are:
 
 - **High accuracy and efficiency** – identify and measure every instance a cast member appears on screen, even if their face is partially occluded or turned away.  Accuracy should exceed 95% and manual effort should be minimal.
 - **Scalable pipeline** – handle large video files, process each episode end‑to‑end and accumulate cast member appearances across multiple episodes and seasons.
@@ -15,9 +15,9 @@ The end‑to‑end process comprises several stages.  Each stage corresponds to 
    - The pipeline reads the episode and divides it into frames at the native frame rate (e.g. 23.976 fps).
 
 2. **Detection & Tracking**
-   - **Two cooperating signals (both required):**
-     - **Face signal (accuracy):** RetinaFace (InsightFace) for detection + alignment to 112×112; ArcFace for embeddings and identity.
-     - **Body continuity signal (credit when face turns):** YOLO (person class) + **ByteTrack**. The person tracker is the **authoritative continuity backbone**. Once a track is labeled by a face match, the identity **persists** while the tracker keeps the ID alive (configurable gap tolerance).
+   - **Face detection**: Use *RetinaFace* (or YOLO-based face detector) to detect faces every N frames (e.g. stride 1 = every frame).  The detector outputs bounding boxes, confidence scores and landmarks.
+   - **Person detection** (optional): Use a YOLO person detector if body tracking is desired when faces turn away.
+   - **Multi-object tracking**: Run ByteTrack or another multi‑object tracker to link detections across frames into continuous tracks with unique IDs.  Tracks record the bounding box positions, start/end timestamps and detection confidence.
    - Detected frames and tracks are stored under `data/harvest/<episode>/` with a manifest containing bounding box coordinates, frame numbers and confidences.
 
 3. **Recognition & Facebank Management**
@@ -27,16 +27,7 @@ The end‑to‑end process comprises several stages.  Each stage corresponds to 
    - **Improving the facebank**: When new faces are discovered or assignments are incorrect, the user can move crops into the appropriate person folder and rebuild the facebank.
 
 4. **Harvest & Ground Truth Assignment**
-   - **Harvest (bootstrap images from episode; mandatory):**
-     1. Iterate frames (`stride=1` by default).
-     2. Detect persons (YOLO) → **ByteTrack** to obtain stable `track_id`s per individual.
-     3. Detect faces (RetinaFace). For each face:
-        - **Align** to **112×112** using InsightFace landmarks (fallback to crop→resize if landmarks fail).
-        - **Associate** faces to person tracks with a relaxed IoU gate (**≥ 0.20**) **after dilating** the track box by 15% on each side and looking back up to ±1 frame for lagging detections; fall back to a center-in-box match when exactly one face candidate lies inside the track.
-     4. **Sampling:** keep **4–8** aligned crops per `track_id`, enforce `min_gap_frames` (**8**), gate on face size (`min_area_frac=0.005`), **frontalness ≥ 0.35**, and drop candidates below the track’s 40th percentile Laplacian sharpness. Quality scoring weights sharpness/frontality/area at **0.35/0.45/0.20**, with at least one high-frontal pick preserved.
-     5. **Write:**
-        - `data/harvest/<video_stem>/track_####/*.jpg` (aligned crops)
-        - `data/harvest/<video_stem>/manifest.json` with per-track stats: `track_id`, `total_frames`, `avg_conf`, `avg_area`, `samples[]`, `first_ts_ms`, `last_ts_ms`.
+   - **Harvest script (`harvest_faces.py`)**: Runs detection and tracking on an episode and saves face crops to `data/harvest/<episode>/tracks`.  It also generates `manifest.json` summarizing the tracks, frame ranges, average area and average confidence.
    - **Manual assignment (optional)**: The manifest helps identify unassigned tracks.  Users can review sample frames and assign the track to a cast member by moving the crops into the correct folder in the facebank.  After manual assignment, rebuild the facebank.
 
 5. **Attribution & Summarization**
@@ -54,49 +45,40 @@ The end‑to‑end process comprises several stages.  Each stage corresponds to 
    - **Export**: The system outputs CSV and JSON to `data/outputs/<episode>/`.  A separate script can upload results to Google Sheets or another data store in the future.
 
 ## 3 Directories & Key Files
-**Repository layout (concrete & binding)**
-
-/configs
-  pipeline.yaml                # thresholds and knobs
-  bytetrack.yaml               # tracker settings
-
-/screentime
-  /detectors
-    face_retina.py             # RetinaFace wrapper (InsightFace)
-    person_yolo.py             # YOLO person detector
-  /tracking
-    bytetrack_wrap.py
-  /recognition
-    embed_arcface.py
-    facebank.py
-    matcher.py                 # cosine + voting persistence
-  /harvest/harvest.py
-  /attribution/{associate.py,aggregate.py}
-  /viz/overlay.py
-  io_utils.py
-  types.py
-
-/scripts
-  harvest_faces.py             # harvest flow (writes data/harvest/* + manifest)
-  build_facebank.py            # build centroid embeddings → data/facebank.parquet
-  run_tracker.py               # YOLO+ByteTrack + RetinaFace + vote persistence
-  make_overlays.py             # render labeled overlay mp4
-  export_totals.py             # CSV/JSON exports (totals, segments, timeline)
-
-**requirements.txt (explicit)**
-
-insightface>=0.7.3
-onnxruntime>=1.20.0           # use onnxruntime-gpu if we add CUDA later
-ultralytics>=8.3.0
-opencv-python>=4.9.0
-numpy>=1.26.0
-pandas>=2.2.0
-pyarrow>=15.0.0
-tqdm>=4.66.0
-pillow>=10.3.0
-streamlit>=1.37.0             # optional labeler UI
-
-(Add `.gitignore` for `data/`, `.venv/`, `models/weights/*`.)
+```
+SCREEN TIME ANALYZER/
+├── configs/
+│   ├── pipeline.yaml         # thresholds (confidence, similarity), stride, min/max durations
+│   └── bytetrack.yaml        # tracker parameters
+├── scripts/                  # wrappers or orchestration scripts
+├── app/                      # command-line or UI application (future)
+├── data/
+│   ├── videos/               # input episodes
+│   ├── harvest/              # harvested face crops and manifests
+│   ├── facebank/             # reference images and computed embeddings
+│   └── outputs/              # CSV/JSON totals, segments, timeline, overlays
+├── models/
+│   └── weights/              # detector and recognition model weights (yolov8n_face.pt, arcface.onnx, etc.)
+└── screentime/
+    ├── detectors/
+    │   ├── face_retina.py    # wrapper around RetinaFace or YOLO face detector
+    │   └── person_yolo.py    # optional person detector
+    ├── tracking/
+    │   └── bytetrack_wrap.py # multi-object tracking wrapper
+    ├── recognition/
+    │   ├── embed_arcface.py  # compute embeddings from crops
+    │   ├── facebank.py       # build and manage the facebank
+    │   └── matcher.py        # match embeddings to facebank
+    ├── harvest/
+    │   └── harvest.py        # pipeline for detection, tracking and cropping
+    ├── attribution/
+    │   ├── associate.py      # merge tracks, fill gaps, remove short runs
+    │   └── aggregate.py      # summarise events and totals
+    ├── viz/
+    │   └── overlay.py        # render overlay video for QA
+    ├── io_utils.py           # common I/O helpers
+    └── types.py              # common dataclasses and type hints
+```
 
 ## 4 Configuration Highlights
 - **`pipeline.yaml`**
@@ -112,39 +94,36 @@ streamlit>=1.37.0             # optional labeler UI
 
 ## 5 Implementation Notes
 1. **Detection Model Choice**:
-   - *RetinaFace* provides strong face detection accuracy.  YOLOv8n supplies robust person detections for body continuity, while RetinaFace via `insightface` feeds ArcFace.
-   - The body continuity path (YOLO + ByteTrack) is **not optional**.  All screen-time attribution is computed over person tracks; face matches assign names to tracks and those labels persist through non-frontal frames.
+   - *RetinaFace* provides strong face detection accuracy.  YOLOv8n can be faster but may underperform on occluded faces.  Our pipeline uses RetinaFace via `insightface` with optional YOLO fallback.
+   - Person detection is optional and should be used if bodies need to be tracked when faces turn away.  We can start with face-only detection and evaluate the need for body tracking.
 
 2. **Embedding & Matching**:
    - Use the ArcFace model (`w600k_r50.onnx`) to compute 512‑dimensional embeddings.  Embeddings are averaged across all crops in a track before matching.
    - Build a robust facebank: include multiple reference images per cast member with different lighting, angles and expressions.  Rebuild the facebank whenever new high-quality images are available.
 
 3. **Harvest & Manual Assignment**:
-   - **Harvest (bootstrap images from episode; mandatory):**
-     1. Iterate frames (`stride=1` by default).
-     2. Detect persons (YOLO) → **ByteTrack** to obtain stable `track_id`s per individual.
-     3. Detect faces (RetinaFace). For each face:
-        - **Align** to **112×112** using InsightFace landmarks (fallback to crop→resize if landmarks fail).
-        - **Associate** faces to person tracks with IoU **≥ 0.20** after 15% box dilation and ±1 frame tolerance; fall back to center-in-box when unique.
-     4. **Sampling:** keep **4–8** representative aligned crops per `track_id`, enforce `min_gap_frames=8`, `min_area_frac=0.005`, and the frontalness/sharpness gates described above.
-     5. **Write:**
-        - `data/harvest/<video_stem>/track_####/*.jpg` (aligned crops)
-        - `data/harvest/<video_stem>/manifest.json` with per-track stats: `track_id`, `total_frames`, `avg_conf`, `avg_area`, `samples[]`, `first_ts_ms`, `last_ts_ms`.
-   - **Manual assignment (optional)**: Move representative crops of each new or misidentified face into `/data/facebank/<name>/` and rerun `build_facebank.py`.
+   - Use `harvest_faces.py` to generate tracks and sample frames.  Inspect samples to ensure the detections are correct.
+   - Move representative crops of each new or misidentified face into `/data/facebank/<name>/` and rerun `build_facebank.py`.
 
 4. **Quality Assurance**:
    - Render overlay videos to visually inspect track assignments.  Adjust thresholds if too many false positives or false negatives occur.
    - Use the timeline CSV to cross‑check totals across episodes.  Investigate large discrepancies.
 
-## 6 Label Persistence & Defaults
-**Label persistence & defaults**
-- **similarity_th:** 0.82 (cosine). If a track collects votes for a label with top weight ≥ runner-up × 2, set `track_identity=label`. Apply **vote_decay** 0.99 per frame so stale votes fade.
-- **flip_tolerance:** require ≥ 30% margin over current label’s cumulative weight to flip an identity on a live track.
-- **segments:** bridge gaps ≤ **max_gap_ms=500**, drop micro-runs < **min_run_ms=200**.
-- **face association:** IoU ≥ 0.20 with 15% box dilation and ±1 frame history; fallback to center-in-box when unique.
-- **harvest defaults:** `samples_per_track=8`, `min_gap_frames=8`, `min_area_frac=0.005`, `min_frontalness=0.35`, `min_sharpness_pct=40`, `det_size=[960,960]`, `face_conf_th=0.45`, `person_conf_th=0.20`.
-
-## 7 Future Work
+## 6 Future Work & MCP Considerations
+- **VS Code MCP Integration**: The VS Code MCP server allows your assistant to request code diagnostics and open files, but due to security restrictions we (as ChatGPT) cannot directly modify your local filesystem.  You will need to copy this PRD file into your `SCREEN TIME ANALYZER` repository manually.
 - **Automation**: Provide a master script (e.g. `run_pipeline.py`) to orchestrate the entire flow given an episode.
 - **Google Sheets Export**: Build a script to push totals and timelines to a Google Sheet via its API.
 - **UI/Web App**: Develop a simple web or desktop app for uploading episodes, running the pipeline and viewing results.
+- **MCP Tools**: Explore using other Model Context Protocol servers (e.g. shell MCP) for remote command execution, but note they currently require a secure, authenticated environment.
+
+## 7 Initial Developer Steps
+1. **Add this PRD**: Create a file named `PRD.md` (or `docs/PRD.md`) in the `SCREEN TIME ANALYZER` repository with the content above.  Commit it to version control.
+2. **Set up the repository**:
+   - Ensure the directory structure matches the layout described above.
+   - Place model weights into `models/weights/` (e.g. YOLOv8n face, RetinaFace, ArcFace models).  Download from official sources if not already present.
+   - Create configuration files `configs/pipeline.yaml` and `configs/bytetrack.yaml` with sensible defaults.
+3. **Install dependencies**: Create a Python virtual environment and install packages such as `insightface`, `ultralytics` (for YOLO), `opencv-python`, `numpy`, `pandas`, `scipy`, `matplotlib`, `pydantic`, and any tracking libraries.
+4. **Implement and test each stage**: Start with face detection and harvesting to validate detection quality.  Then add recognition, attribution and summarization modules.
+5. **Build automation scripts**: Create CLI wrappers in `scripts/` (e.g. `scripts/harvest.py`, `scripts/build_facebank.py`, `scripts/associate.py`, `scripts/summarise.py`) to run the stages individually.
+
+EOF

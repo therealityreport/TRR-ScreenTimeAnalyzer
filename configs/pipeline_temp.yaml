@@ -1,0 +1,49 @@
+# Frame sampling & detection
+stride: 1
+det_size: [960, 960]
+face_conf_th: 0.45
+person_conf_th: 0.20
+face_in_track_iou: 0.20          # moderate - between old 0.15 and new 0.25
+allow_face_center: true          # re-enable to help with matches
+dilate_track_px: 0.08
+temporal_iou_tolerance: 1
+
+# Harvest sampling
+samples_per_track: 12
+samples_min: 6
+samples_max: 16
+min_gap_frames: 8
+min_area_frac: 0.005
+min_area_px: null
+min_sharpness_laplacian: 50.0
+sharpness_pctile: 20
+min_frontalness: 0.25
+frontal_pctile: 50
+min_frontal_picks: 2
+profile_asymmetry_thresh: 0.35
+quality_weights: [0.4, 0.4, 0.2]
+target_area_frac: 0.02
+debug_rejections: false
+multi_face_per_track_guard: true
+multi_face_tiebreak: quality
+fallback_head_pct: 0.4
+
+# Identity purity guard
+identity_guard: true
+identity_sim_threshold: 0.62
+identity_min_picks: 3
+reindex_harvest_tracks: true
+
+# Track gap handling
+max_gap_ms: 200
+min_run_ms: 750
+
+# Identity voting & persistence
+similarity_th: 0.82
+vote_decay: 0.99
+flip_tolerance: 0.30
+
+# Identity change detection and splitting
+identity_split_min_frames: 5
+identity_change_margin: 0.05
+identity_split_enabled: true

@@ -1,43 +1,50 @@
 # Frame sampling & detection
-stride: 1                         # process every frame by default
+stride: 2                         # process every other frame by default (RHOBH test baseline)
 det_size: [960, 960]              # RetinaFace detection resolution (w, h)
-face_conf_th: 0.45
+face_conf_th: 0.40
 person_conf_th: 0.20
-face_in_track_iou: 0.25          # slightly stricter overlap in crowded frames
-allow_face_center: false         # keep center fallback disabled by default
-dilate_track_px: 0.08            # reduce dilation to tighten association
+face_in_track_iou: 0.15           # slightly looser IoU so wide shots still associate
+allow_face_center: false         # disabled to avoid attaching wrong face within same box
+dilate_track_px: 0.11            # broaden dilation for better face ↔ track overlap
 temporal_iou_tolerance: 1        # allow +/- 1 frame history when associating faces to tracks
 
 # Harvest sampling
-samples_per_track: 8
-samples_min: 4
-samples_max: 12
+samples_per_track: 12
+samples_min: 6
+samples_max: 16
 min_gap_frames: 8
 min_area_frac: 0.005
 min_area_px: null                 # override if using absolute pixel gate
-min_sharpness_laplacian: null     # optional absolute Laplacian floor (set when needed)
-min_sharpness_pct: 40             # reject samples below this per-track sharpness percentile
-min_frontalness: 0.35             # minimum frontalness for a sample to qualify
-profile_asymmetry_thresh: 0.25    # tighter asymmetry threshold to flag profile views
-quality_weights: [0.35, 0.45, 0.20]  # weights for [sharpness, frontalness, area closeness]
-target_area_frac: 0.06            # area fraction considered "ideal" for quality scoring
-debug_rejections: true            # write harvest_debug.json & detailed reject stats
+min_sharpness_laplacian: 50.0     # baseline sharpness for quality normalization (fixes discrimination between 200-400 range)
+sharpness_pctile: 20              # reject samples below this per-track sharpness percentile (lowered to capture more faces)
+min_frontalness: 0.25             # minimum frontalness for a sample to qualify (lowered to accept more angles)
+frontal_pctile: 50                # ensure >= this percentile contributes to picks
+min_frontal_picks: 2
+profile_asymmetry_thresh: 0.35    # relaxed yaw tolerance to keep more faces
+quality_weights: [0.4, 0.4, 0.2]  # weights for [sharpness, frontalness, area closeness] - balanced for clear identifiable faces
+target_area_frac: 0.02            # area fraction considered "ideal" for quality scoring
+debug_rejections: false           # opt-in detailed reject stats
 multi_face_per_track_guard: true
 multi_face_tiebreak: quality
 fallback_head_pct: 0.4
 
 # Identity purity guard & harvest track indexing
 identity_guard: true
-identity_split: true
 identity_sim_threshold: 0.62
-identity_min_picks: 2
+identity_min_picks: 3
 reindex_harvest_tracks: true
 
 # Track gap handling
-max_gap_ms: 500
-min_run_ms: 200
+max_gap_ms: 300
+min_run_ms: 600
 
 # Identity voting & persistence
-similarity_th: 0.82
+similarity_th: 0.78
 vote_decay: 0.99
 flip_tolerance: 0.30
+
+# Identity change detection and splitting
+identity_split_min_frames: 5      # frames required to confirm a label change
+identity_change_margin: 0.05      # cosine margin new_label - old_label to allow split (lower = more sensitive)
+identity_split_enabled: true       # enable runtime identity splitting
+embed_every_n: 2

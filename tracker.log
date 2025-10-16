@@ -1,0 +1,67 @@
+2025-10-14 21:38:22,864 | INFO | screentime.detectors.person | Loaded YOLO person detector weights=models/weights/yolov8n.pt device=auto conf=0.20
+/Volumes/HardDrive/SCREEN TIME ANALYZER/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+2025-10-14 21:38:26,120 | INFO | screentime.detectors.face | Loaded RetinaFace detector det_size=(960, 960) det_thresh=0.45 providers=('CPUExecutionProvider',) backend=CPUExecutionProvider
+2025-10-14 21:38:26,327 | INFO | screentime.tracking.bytetrack | Initialised ByteTrackWrapper track_buffer=25 match_thresh=0.85 conf_thres=0.10
+2025-10-14 21:38:26,327 | INFO | screentime.recognition.embed | Loading ArcFace model arcface_r100_v1 providers=['CPUExecutionProvider']
+2025-10-14 21:38:26,327 | INFO | screentime.recognition.embed | Falling back to FaceAnalysis recognition model
+2025-10-14 21:38:27,224 | INFO | scripts.run_tracker | Loaded facebank: 6 identities → ['BRANDI', 'KIM', 'KYLE', 'LVP', 'RINNA', 'YOLANDA']
+2025-10-14 21:38:27,224 | INFO | scripts.run_tracker | Identity-split config: enabled=True min_frames=5 change_margin=0.050
+2025-10-14 21:38:27,224 | INFO | scripts.run_tracker | Matching config: similarity_th=0.820 vote_decay=0.990 flip_tolerance=0.300
+2025-10-14 21:38:27,677 | INFO | scripts.run_tracker | Running tracker video=/Volumes/HardDrive/SHOWS/RHOBH/EPISODES/SEASON 5/AMSTERDAM/FIGHT/RHOBH-TEST.mp4 fps=24.00 frames=2164 facebank=data/facebank.parquet
+2025-10-14 21:39:06,495 | INFO | scripts.run_tracker | Tracker progress 5.0% (108/2164 frames seen, processed=108, active=1, finished=0, labelled=0)
+2025-10-14 21:39:48,106 | INFO | scripts.run_tracker | Tracker progress 10.0% (216/2164 frames seen, processed=216, active=1, finished=1, labelled=0)
+2025-10-14 21:40:22,414 | INFO | scripts.run_tracker | Tracker progress 15.0% (324/2164 frames seen, processed=324, active=1, finished=2, labelled=1)
+2025-10-14 21:41:05,567 | INFO | scripts.run_tracker | Tracker progress 20.0% (432/2164 frames seen, processed=432, active=2, finished=4, labelled=1)
+2025-10-14 21:41:43,237 | INFO | scripts.run_tracker | Tracker progress 25.0% (540/2164 frames seen, processed=540, active=4, finished=7, labelled=0)
+2025-10-14 21:42:26,860 | INFO | scripts.run_tracker | Tracker progress 29.9% (648/2164 frames seen, processed=648, active=1, finished=11, labelled=1)
+2025-10-14 21:43:04,636 | INFO | scripts.run_tracker | Tracker progress 34.9% (756/2164 frames seen, processed=756, active=1, finished=12, labelled=1)
+2025-10-14 21:43:51,298 | INFO | scripts.run_tracker | Tracker progress 39.9% (864/2164 frames seen, processed=864, active=0, finished=12, labelled=0)
+2025-10-14 21:44:36,295 | INFO | scripts.run_tracker | Tracker progress 44.9% (972/2164 frames seen, processed=972, active=2, finished=13, labelled=0)
+2025-10-14 21:45:15,688 | INFO | scripts.run_tracker | Tracker progress 49.9% (1080/2164 frames seen, processed=1080, active=1, finished=13, labelled=0)
+2025-10-14 21:45:54,165 | INFO | scripts.run_tracker | Tracker progress 54.9% (1188/2164 frames seen, processed=1188, active=1, finished=16, labelled=0)
+2025-10-14 21:46:30,058 | INFO | scripts.run_tracker | Tracker progress 59.9% (1296/2164 frames seen, processed=1296, active=2, finished=17, labelled=0)
+2025-10-14 21:47:06,464 | INFO | scripts.run_tracker | Tracker progress 64.9% (1404/2164 frames seen, processed=1404, active=2, finished=19, labelled=0)
+2025-10-14 21:47:43,937 | INFO | scripts.run_tracker | Tracker progress 69.9% (1512/2164 frames seen, processed=1512, active=3, finished=21, labelled=0)
+2025-10-14 21:48:22,235 | INFO | scripts.run_tracker | Tracker progress 74.9% (1620/2164 frames seen, processed=1620, active=3, finished=22, labelled=1)
+2025-10-14 21:48:56,515 | INFO | scripts.run_tracker | Tracker progress 79.9% (1728/2164 frames seen, processed=1728, active=2, finished=24, labelled=1)
+2025-10-14 21:49:31,256 | INFO | scripts.run_tracker | Tracker progress 84.8% (1836/2164 frames seen, processed=1836, active=1, finished=25, labelled=1)
+2025-10-14 21:50:05,872 | INFO | scripts.run_tracker | Tracker progress 89.8% (1944/2164 frames seen, processed=1944, active=3, finished=25, labelled=1)
+2025-10-14 21:50:41,174 | INFO | scripts.run_tracker | Tracker progress 94.8% (2052/2164 frames seen, processed=2052, active=5, finished=27, labelled=1)
+2025-10-14 21:51:13,323 | INFO | scripts.run_tracker | Tracker progress 99.8% (2160/2164 frames seen, processed=2160, active=3, finished=30, labelled=1)
+2025-10-14 21:51:14,151 | INFO | scripts.run_tracker | Tracker progress 100.0% (2163/2164 frames seen, processed=2163, active=0, finished=32, labelled=1)
+2025-10-14 21:51:14,153 | INFO | screentime.recognition.matcher | Finalized subtrack 24.0: KYLE (frames 1554-2029, 14 labeled frames, avg_sim=0.904)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate | Track 24: Processing 1 subtracks (final_label=KYLE)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate |   Subtrack 24.0: KYLE (frames 1554-2029, 14 labeled frames)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate |       Filtered (too_short) segment 24.0: KYLE frames 1554→1554 duration_ms=0.0 (need 750.0), frame_span=1 (need 18)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate |       Filtered (too_short) segment 24.0: KYLE frames 1972→1972 duration_ms=0.0 (need 750.0), frame_span=1 (need 18)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate |       Filtered (too_short) segment 24.0: KYLE frames 2014→2029 duration_ms=625.1 (need 750.0), frame_span=16 (need 18)
+2025-10-14 21:51:14,159 | INFO | screentime.attribution.aggregate |     → Generated 0 segments
+2025-10-14 21:51:14,174 | WARNING | screentime.attribution.aggregate |     → FILTERED OUT: duration_ms=19794.6, min_run_ms=750.0
+2025-10-14 21:51:14,174 | INFO | scripts.run_tracker | Generated 0 segments (0 labeled, 0 unlabeled) from 32 tracks
+2025-10-14 21:51:14,320 | INFO | scripts.run_tracker | Tracker outputs written: totals=data/outputs/RHOBH-TEST/RHOBH-TEST-TOTALS.csv segments=data/outputs/RHOBH-TEST/RHOBH-TEST-segments.csv tracks=data/outputs/RHOBH-TEST/RHOBH-TEST-tracks.csv timeline=data/outputs/RHOBH-TEST/RHOBH-TEST-timeline.csv track_timeline=data/outputs/RHOBH-TEST/RHOBH-TEST-track_timeline.csv annotations=data/outputs/RHOBH-TEST/RHOBH-TEST-annotations.json
+2025-10-14 21:51:14,320 | INFO | scripts.run_tracker | Running output consistency checks...
+2025-10-14 21:51:14,320 | WARNING | scripts.run_tracker | Consistency check: 1 labeled tracks missing from segments.csv: [24]
+2025-10-14 21:51:14,320 | INFO | scripts.run_tracker | Output consistency checks complete.
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /Users/thomashulihan/.insightface/models/buffalo_l/1k3d68.onnx landmark_3d_68
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /Users/thomashulihan/.insightface/models/buffalo_l/2d106det.onnx landmark_2d_106
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/det_10g.onnx detection [1, 3, '?', '?'] 127.5 128.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /Users/thomashulihan/.insightface/models/buffalo_l/genderage.onnx genderage
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+model ignore: /Users/thomashulihan/.insightface/models/buffalo_l/w600k_r50.onnx recognition
+set det-size: (960, 960)
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/1k3d68.onnx landmark_3d_68 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/2d106det.onnx landmark_2d_106 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/det_10g.onnx detection [1, 3, '?', '?'] 127.5 128.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/genderage.onnx genderage ['None', 3, 96, 96] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: /Users/thomashulihan/.insightface/models/buffalo_l/w600k_r50.onnx recognition ['None', 3, 112, 112] 127.5 127.5
+set det-size: (640, 640)

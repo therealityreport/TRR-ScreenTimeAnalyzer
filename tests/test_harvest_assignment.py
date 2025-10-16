@@ -69,4 +69,16 @@ def test_quality_scores_frontal_higher():
 
 def test_default_face_in_track_iou_threshold():
     config = HarvestConfig()
-    assert config.face_in_track_iou == 0.20
+    assert config.face_in_track_iou == 0.25
+
+
+def test_center_fallback_requires_unique_candidate():
+    runner = build_runner()
+    faces = [
+        (10, 10, 30, 30),
+        (40, 40, 60, 60),
+    ]
+    person_bbox = (0, 0, 80, 80)
+    candidate_faces = [idx for idx, bbox in enumerate(faces) if runner._face_center_in_bbox(bbox, person_bbox)]
+    assert len(candidate_faces) == 2
+    assert len(candidate_faces) != 1

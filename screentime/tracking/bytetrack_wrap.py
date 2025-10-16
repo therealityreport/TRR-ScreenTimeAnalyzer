@@ -132,7 +132,7 @@ class TrackAccumulator:
 
     def __init__(self) -> None:
         self.active: Dict[int, TrackState] = {}
-        self.finished: Dict[int, TrackState] = {}
+        self.finished: List[TrackState] = []
 
     def update(
         self,
@@ -153,15 +153,17 @@ class TrackAccumulator:
         for tid in lost_ids:
             state = self.active.pop(tid)
             state.active = False
-            self.finished[tid] = state
+            self.finished.append(state)
 
     def flush(self) -> List[TrackState]:
         """Mark remaining active tracks as finished and return all."""
         for tid, state in list(self.active.items()):
             state.active = False
-            self.finished[tid] = state
+            self.finished.append(state)
             self.active.pop(tid, None)
-        return list(self.finished.values())
+        finished_tracks = list(self.finished)
+        self.finished.clear()
+        return finished_tracks
 
 
 class _SimpleTracker:
