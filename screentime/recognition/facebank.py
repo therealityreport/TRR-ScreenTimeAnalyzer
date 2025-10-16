@@ -66,7 +66,12 @@ def build_facebank(
         label = sample.path.parent.name
         image = _load_image(sample.path)
         if aligner is not None:
-            aligned = aligner.align_to_112(image, None, (0, 0, image.shape[1], image.shape[0]))
+            aligned = aligner.align_to_112(
+                image,
+                None,
+                (0, 0, image.shape[1], image.shape[0]),
+                force_bbox=getattr(aligner, "force_bbox_alignment", False),
+            )
         else:
             aligned = cv2.resize(image, (112, 112))
         embedding = embedder.embed(aligned)

@@ -52,6 +52,11 @@ class RetinaFaceDetector:
         else:
             provider_list = tuple(providers)
         self.providers = provider_list
+        # CoreML-backed inference yields reliable 5-point landmarks, while CPU-only
+        # execution often produces jitter that hurts downstream alignment. When we
+        # detect a CPU-only configuration we fall back to simple bbox crops for
+        # embedding stages to preserve cosine similarity performance.
+        self.force_bbox_alignment = provider_list == ("CPUExecutionProvider",)
         self.app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=list(provider_list))
         ctx_id = 0  # auto GPU/CoreML if available
         self.app.prepare(ctx_id=ctx_id, det_size=self.det_size)
@@ -92,10 +97,20 @@ class RetinaFaceDetector:
         return detections
 
     @staticmethod
-    def align_to_112(image: np.ndarray, landmarks: Optional[np.ndarray], bbox: BBox) -> np.ndarray:
+    def align_to_112(
+        image: np.ndarray,
+        landmarks: Optional[np.ndarray],
+        bbox: BBox,
+        force_bbox: bool = False,
+    ) -> np.ndarray:
         """Align face to 112x112 using landmarks if available, else simple crop+resize."""
         target_size = (112, 112)
-        if landmarks is None or landmarks.shape != (5, 2):
+        if (
+            force_bbox
+            or landmarks is None
+            or not isinstance(landmarks, np.ndarray)
+            or landmarks.shape != (5, 2)
+        ):
             x1, y1, x2, y2 = [int(round(v)) for v in bbox]
             crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
             if crop.size == 0:
@@ -122,4 +137,11 @@ class RetinaFaceDetector:
             return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
 
         aligned = cv2.warpAffine(image, trans, target_size, borderValue=0.0)
+        # Guard against degenerate warps that produce mostly empty content.
+        if aligned.size == 0 or float(np.count_nonzero(aligned)) / float(aligned.size) < 0.05:
+            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+            crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+            if crop.size == 0:
+                crop = image
+            return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
         return aligned

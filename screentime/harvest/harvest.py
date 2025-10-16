@@ -592,7 +592,12 @@ class HarvestRunner:
                     )
                     continue
 
-                aligned = self.face_detector.align_to_112(frame, face.landmarks, face.bbox)
+                aligned = self.face_detector.align_to_112(
+                    frame,
+                    face.landmarks,
+                    face.bbox,
+                    force_bbox=getattr(self.face_detector, "force_bbox_alignment", False),
+                )
                 sharpness = self._compute_sharpness(aligned)
                 area = bbox_area(face.bbox)
                 area_frac = area / frame_area if frame_area else 0.0

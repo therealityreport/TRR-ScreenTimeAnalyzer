@@ -31,6 +31,8 @@ LOWCONF_DEBUG_LABELS = {"LVP", "BRANDI", "RINNA", "EILEEN"}
 PER_LABEL_SIMILARITY_TH_OVERRIDES = {
     "LVP": 0.60,
     "EILEEN": 0.64,
+    "KIM": 0.56,
+    "BRANDI": 0.55,
 }
 DEFAULT_MIN_MARGIN = 0.0
 
@@ -371,7 +373,12 @@ def main() -> None:
                 if frame_idx - state.last_embed_frame < embed_every_n:
                     should_embed = False
             if should_embed:
-                aligned = face_detector.align_to_112(frame, face.landmarks, face.bbox)
+                aligned = face_detector.align_to_112(
+                    frame,
+                    face.landmarks,
+                    face.bbox,
+                    force_bbox=getattr(face_detector, "force_bbox_alignment", False),
+                )
                 embedding = embedder.embed(aligned)
                 match = matcher.best_match(embedding)
                 if match is not None:
