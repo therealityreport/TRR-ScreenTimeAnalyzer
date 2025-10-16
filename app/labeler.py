@@ -268,10 +268,8 @@ def display_command_output(return_code: int, output: str, success_message: str, 
             st.code(output)
 
 
-def render_track_montage_controls(harvest_dir: Path, track_id: int) -> None:
-    track_dir = harvest_dir / f"track_{track_id:04d}"
-    if not track_dir.exists():
-        st.warning("Track directory missing; cannot build montage.")
+def render_track_montage_controls(track_dir: Optional[Path], track_id: int) -> None:
+    if track_dir is None or not track_dir.exists():
         return
     if st.button("Generate montage", key=f"montage_btn_{track_id}"):
         cmd = [sys.executable, "scripts/make_montage.py", str(track_dir)]
@@ -400,28 +398,38 @@ def render_assignment_panel(
     elif new_label.strip():
         target_label = new_label.strip().upper()
 
-    st.caption("Keyboard: A=Assign, N=Next track, Space=toggle focus sample.")
-    assign_disabled = not selected_paths or target_label is None
-    should_assign = st.button(
-        f"Assign {len(selected_paths)} sample(s)",
-        disabled=assign_disabled,
-        key=f"assign_btn_{track_id}",
+    st.caption("Keyboard: A=Assign selected, N=Next cluster, Space=toggle focus sample.")
+    assign_selected_disabled = target_label is None or not selected_paths
+    assign_selected_requested = st.button(
+        f"Assign {len(selected_paths)} selected",
+        disabled=assign_selected_disabled,
+        key=f"assign_selected_btn_{track_id}",
         type="primary",
     )
+    assign_all_requested = st.button(
+        f"Assign all {len(track_samples)} samples",
+        disabled=target_label is None or track_samples.empty,
+        key=f"assign_all_btn_{track_id}",
+    )
+
+    representative_sample: Optional[Path] = None
+    if selected_paths:
+        representative_sample = Path(selected_paths[0])
+    elif not track_samples.empty:
+        representative_sample = Path(track_samples.iloc[0]["path"])
 
     suggestions_placeholder = st.empty()
-    suggestion_sample = Path(selected_paths[0]) if selected_paths else None
     facebank_embeddings = {}
     suggestion_error = None
-    if suggestion_sample and (facebank_dir / "facebank.parquet").exists():
+    if representative_sample and (facebank_dir / "facebank.parquet").exists():
         try:
             facebank_embeddings = load_facebank_cached(str(facebank_dir / "facebank.parquet"))
         except Exception as exc:  # pragma: no cover - best-effort load
             suggestion_error = str(exc)
-    if suggestion_sample and facebank_embeddings:
+    if representative_sample and facebank_embeddings:
         try:
             embedding = embed_sample_cached(
-                str(suggestion_sample),
+                str(representative_sample),
                 CLI_ARGS.arcface_model,
                 tuple(CLI_ARGS.providers) if CLI_ARGS.providers else None,
             )
@@ -438,11 +446,19 @@ def render_assignment_panel(
     else:
         suggestions_placeholder.info("Suggestions unavailable (build facebank first).")
 
-    # Handle keyboard shortcut for assign
-    if not should_assign:
-        should_assign = st.session_state.pop(f"shortcut_assign_{track_id}", False) and target_label is not None
-    
-    if should_assign:
+    # Handle keyboard shortcut for assign selected
+    if not assign_selected_requested:
+        assign_selected_requested = (
+            st.session_state.pop(f"shortcut_assign_{track_id}", False) and target_label is not None
+        )
+
+    paths_to_assign: List[str] = []
+    if assign_all_requested and target_label is not None:
+        paths_to_assign = [str(Path(p)) for p in track_samples["path"].tolist()]
+    elif assign_selected_requested and target_label is not None:
+        paths_to_assign = list(selected_paths)
+
+    if paths_to_assign and target_label is not None:
         try:
             normalized_label = assign_lib.normalize_label(target_label or "")
         except ValueError as exc:
@@ -454,7 +470,7 @@ def render_assignment_panel(
                 existing_sources.update(details.sources)
 
             result = assign_lib.assign_samples(
-                [Path(p) for p in selected_paths],
+                [Path(p) for p in paths_to_assign],
                 stem=stem,
                 harvest_id=track_id,
                 byte_track_id=byte_track_id,
@@ -470,9 +486,6 @@ def render_assignment_panel(
                 st.rerun()
             else:
                 st.info("No files copied.")
-
-    if st.button("Next track ▶", key=f"next_track_btn_{track_id}"):
-        st.session_state["advance_track"] = True
 
     render_track_montage_controls(harvest_dir, track_id)
     render_overlay_controls(harvest_dir, CLI_ARGS.video, stem, track_id)
@@ -532,7 +545,7 @@ def render_thumbnail_grid(
                 thumb_path = thumb_lib.ensure_thumbnail(path, stem, thumbnails_dir)
                 cols[col_idx].image(
                     str(thumb_path),
-                    use_container_width=True,
+                    width="stretch",
                     caption=", ".join(caption_parts) if caption_parts else path.name,
                 )
             except FileNotFoundError:
@@ -565,8 +578,6 @@ def main() -> None:
     min_frames = st.sidebar.slider("Min track frames", 0, 300, 0, step=5)
     quality_percentile = st.sidebar.slider("Quality percentile", 0, 100, 0)
     search_term = st.sidebar.text_input("Search track / byte id")
-    page_size = st.sidebar.slider("Tracks per page", 5, 30, 10, step=5)
-
     manifest_df = load_manifest_cached(str(harvest_dir))
     samples_df = load_samples_cached(str(harvest_dir))
     if samples_df.empty:
@@ -600,34 +611,59 @@ def main() -> None:
         ascending=[True, False, False],
     )
 
+    cluster_track_ids: List[int] = []
+    if "provider" in samples_df.columns:
+        provider_mask = samples_df["provider"].fillna("").astype(str) == "cluster_preview"
+        cluster_track_ids = (
+            samples_df.loc[provider_mask, "track_id"].dropna().astype(int).unique().tolist()
+        )
+    if cluster_track_ids:
+        filtered = filtered[filtered["track_id"].isin(cluster_track_ids)]
+
+    filtered = filtered.sort_values("track_id").reset_index(drop=True)
     track_ids = filtered["track_id"].astype(int).tolist()
-    active_track = ensure_active_track(track_ids)
 
-    total_pages = max(1, math.ceil(len(filtered) / page_size))
-    page_num = min(st.sidebar.number_input("Page", min_value=1, max_value=total_pages, value=1), total_pages)
-    start_idx = (page_num - 1) * page_size
-    end_idx = start_idx + page_size
-    paged = filtered.iloc[start_idx:end_idx]
-
-    st.sidebar.caption(f"{len(filtered)} tracks match filters")
-
-    for _, row in paged.iterrows():
-        render_track_card(row, include_debug)
-        st.divider()
-
-    if active_track is None:
-        st.info("Select a track to review.")
+    if not track_ids:
+        st.info("No scene-aware clusters available. Run harvest with --cluster-preview or adjust filters.")
         return
+
+    active_track = ensure_active_track(track_ids)
+    if active_track not in track_ids:
+        active_track = track_ids[0]
+        st.session_state["active_track_id"] = active_track
+
+    st.sidebar.caption(f"{len(track_ids)} clusters ready to review")
 
     track_samples = data_lib.samples_for_track(samples_df, active_track, include_debug=include_debug)
     if track_samples.empty:
         st.warning("No samples for selected track.")
         return
+    active_index = track_ids.index(active_track)
+    cluster_label = None
+    if "cluster_id" in track_samples.columns:
+        unique_clusters = track_samples["cluster_id"].dropna().unique().tolist()
+        if unique_clusters:
+            cid = int(unique_clusters[0])
+            cluster_label = f"Cluster {cid:04d}" if cid >= 0 else "Noise Cluster"
+
+    cluster_title = cluster_label or f"Track {active_track:04d}"
+
+    nav_cols = st.columns([1, 3, 1])
+    with nav_cols[0]:
+        if st.button("◀ Previous", key="cluster_prev"):
+            st.session_state["active_track_id"] = track_ids[(active_index - 1) % len(track_ids)]
+            st.rerun()
+    with nav_cols[1]:
+        st.subheader(f"{cluster_title} • Track {active_track:04d}")
+        st.caption(f"{active_index + 1} of {len(track_ids)} • {len(track_samples)} samples")
+    with nav_cols[2]:
+        if st.button("Next ▶", key="cluster_next"):
+            st.session_state["active_track_id"] = track_ids[(active_index + 1) % len(track_ids)]
+            st.rerun()
+
     focus_key = f"focused_sample_{active_track}"
     if focus_key not in st.session_state and not track_samples.empty:
         st.session_state[focus_key] = track_samples.index[0]
-
-    st.header(f"Track {active_track:04d}")
 
     st.markdown(
         """

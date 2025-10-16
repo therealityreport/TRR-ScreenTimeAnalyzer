@@ -277,6 +277,22 @@ class HarvestRunner:
         video_stem = infer_video_stem(video_path)
         harvest_dir = ensure_dir(output_root / video_stem)
         crops_dir = ensure_dir(harvest_dir)
+        candidates_root = ensure_dir(harvest_dir / "candidates")
+        candidate_dirs: Dict[int, Path] = {}
+
+        def _candidate_dir(track_id: int) -> Path:
+            track_dir = candidate_dirs.get(track_id)
+            if track_dir is None:
+                track_dir = ensure_dir(candidates_root / f"track_{track_id:04d}")
+                candidate_dirs[track_id] = track_dir
+            return track_dir
+
+        def save_candidate_image(image: Optional[np.ndarray], track_id: int, frame_idx: int) -> None:
+            if image is None:
+                return
+            track_dir = _candidate_dir(track_id)
+            candidate_path = track_dir / f"F{frame_idx:06d}.jpg"
+            cv2.imwrite(str(candidate_path), image)
 
         accumulator = TrackAccumulator()
         sampling_states: Dict[int, TrackSamplingState] = {}
@@ -720,6 +736,7 @@ class HarvestRunner:
                         "provider": embed_provider,
                     },
                 )
+                save_candidate_image(face_sample.image, face_sample.track_id, face_sample.frame_idx)
 
                 sampling_state = sampling_states.setdefault(face_sample.track_id, TrackSamplingState())
                 removed = sampling_state.add_candidate(

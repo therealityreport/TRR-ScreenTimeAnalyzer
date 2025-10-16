@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -31,6 +31,8 @@ class TrackVotingMatcher:
         identity_split_enabled: bool = True,
         identity_split_min_frames: int = 5,
         identity_change_margin: float = 0.08,
+        per_label_th: Optional[Dict[str, float]] = None,
+        min_margin: float = 0.0,
     ) -> None:
         self.facebank = {label: l2_normalize(vec) for label, vec in facebank.items()}
         self.similarity_th = similarity_th
@@ -40,19 +42,40 @@ class TrackVotingMatcher:
         self.identity_split_enabled = identity_split_enabled
         self.identity_split_min_frames = identity_split_min_frames
         self.identity_change_margin = identity_change_margin
+        self.per_label_th = per_label_th or {}
+        self.min_margin = min_margin
 
     def best_match(self, embedding: np.ndarray) -> Optional[Tuple[str, float]]:
         if not self.facebank:
             return None
         embedding = l2_normalize(embedding)
-        scores = {
-            label: cosine_similarity(vec, embedding)
+        scores = [
+            (label, cosine_similarity(vec, embedding))
             for label, vec in self.facebank.items()
-        }
-        label, score = max(scores.items(), key=lambda item: item[1])
-        if score < self.similarity_th:
+        ]
+        scores.sort(key=lambda item: item[1], reverse=True)
+        if not scores:
             return None
-        return label, score
+        top_label, top_score = scores[0]
+        runner_score = scores[1][1] if len(scores) > 1 else float("-inf")
+        required = self.per_label_th.get(top_label, self.similarity_th)
+        if top_score < required:
+            return None
+        if (top_score - runner_score) < self.min_margin:
+            return None
+        return top_label, top_score
+
+    def topk(self, embedding: np.ndarray, k: int = 3) -> List[Tuple[str, float]]:
+        """Return the top-k matches without applying the similarity threshold."""
+        if not self.facebank:
+            return []
+        embedding = l2_normalize(embedding)
+        sims = [
+            (label, float(np.dot(vec, embedding)))
+            for label, vec in self.facebank.items()
+        ]
+        sims.sort(key=lambda item: item[1], reverse=True)
+        return sims[:k]
 
     def update_track(self, track: TrackState, embedding: np.ndarray, frame_idx: Optional[int] = None) -> None:
         match = self.best_match(embedding)

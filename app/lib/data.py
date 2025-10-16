@@ -180,7 +180,11 @@ def load_assignments(log_path: Path) -> Tuple[List[Dict], Dict[TrackKey, TrackAs
             stem = entry.get("stem")
             harvest_id = _safe_int(entry.get("harvest_id"))
             byte_track_id = _safe_int(entry.get("byte_track_id"))
-            key = TrackKey(stem=stem or "", harvest_id=harvest_id or -1, byte_track_id=byte_track_id or -1)
+            key = TrackKey(
+                stem=stem or "",
+                harvest_id=harvest_id if harvest_id is not None else -1,
+                byte_track_id=byte_track_id if byte_track_id is not None else -1,
+            )
             info = index.get(key)
             if info is None:
                 info = TrackAssignment(persons=[], sources=[], destinations=[])

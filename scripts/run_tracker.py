@@ -25,6 +25,12 @@ from screentime.types import TrackState, bbox_area, iou
 
 
 LOGGER = logging.getLogger("scripts.run_tracker")
+LOWCONF_DEBUG_LABELS = {"LVP", "BRANDI", "RINNA", "EILEEN"}
+PER_LABEL_SIMILARITY_TH_OVERRIDES = {
+    "LVP": 0.60,
+    "EILEEN": 0.64,
+}
+DEFAULT_MIN_MARGIN = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -219,6 +225,13 @@ def main() -> None:
         dilate_track_px,
     )
     
+    per_label_th_cfg = pipeline_cfg.get("per_label_similarity_th", {})
+    per_label_th: Dict[str, float] = {
+        str(label): float(threshold) for label, threshold in per_label_th_cfg.items()
+    }
+    per_label_th.update(PER_LABEL_SIMILARITY_TH_OVERRIDES)
+    min_margin = float(pipeline_cfg.get("match_min_margin", DEFAULT_MIN_MARGIN))
+
     matcher = TrackVotingMatcher(
         facebank_embeddings,
         similarity_th=similarity_th,
@@ -227,9 +240,17 @@ def main() -> None:
         identity_split_enabled=identity_split_enabled,
         identity_split_min_frames=identity_split_min_frames,
         identity_change_margin=identity_change_margin,
+        per_label_th=per_label_th,
+        min_margin=min_margin,
     )
 
     video_path = args.video
+    video_stem = infer_video_stem(video_path)
+    output_dir = ensure_dir(args.output_dir / video_stem)
+    lowconf_path = output_dir / "lowconf.csv"
+    if lowconf_path.exists():
+        lowconf_path.unlink()
+    lowconf_written = False
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Unable to open video {video_path}")
@@ -353,6 +374,17 @@ def main() -> None:
                 match = matcher.best_match(embedding)
                 if match is not None:
                     track_similarity[assigned_track] = match[1]
+                else:
+                    top3 = matcher.topk(embedding, k=3)
+                    for lbl, sc in top3:
+                        if lbl in LOWCONF_DEBUG_LABELS:
+                            if not lowconf_written:
+                                with lowconf_path.open("w") as f:
+                                    f.write("frame_idx,timestamp_ms,track_id,label,score\n")
+                                lowconf_written = True
+                            with lowconf_path.open("a") as f:
+                                f.write(f"{frame_idx},{timestamp_ms:.1f},{assigned_track},{lbl},{sc:.3f}\n")
+                            break
                 associate.apply_embedding(state, embedding, matcher, frame_idx)
                 state.last_embed_frame = frame_idx
                 if state.label:
@@ -459,9 +491,6 @@ def main() -> None:
         sum(len(t.subtracks) for t in tracks_with_subtracks),
         sum(len(t.label_scores) for t in tracks),
     )
-
-    video_stem = infer_video_stem(video_path)
-    output_dir = ensure_dir(args.output_dir / video_stem)
 
     max_gap_ms = args.max_gap_ms if args.max_gap_ms is not None else pipeline_cfg.get("max_gap_ms", 200)
     min_run_ms = args.min_run_ms if args.min_run_ms is not None else pipeline_cfg.get("min_run_ms", 750)

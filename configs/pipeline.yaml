@@ -1,29 +1,34 @@
-# Frame sampling & detection
-stride: 2                         # process every other frame by default (RHOBH test baseline)
-det_size: [960, 960]              # RetinaFace detection resolution (w, h)
-face_conf_th: 0.40
-person_conf_th: 0.20
-face_in_track_iou: 0.15           # slightly looser IoU so wide shots still associate
-allow_face_center: false         # disabled to avoid attaching wrong face within same box
-dilate_track_px: 0.11            # broaden dilation for better face ↔ track overlap
-temporal_iou_tolerance: 1        # allow +/- 1 frame history when associating faces to tracks
+# OPTIMIZED CONFIGURATION - Improved face detection and harvest
+# Updated: 2025-10-16
+# Changes: Lower thresholds for better face detection coverage
+# Backup of original settings: configs/pipeline_original.yaml
 
-# Harvest sampling
+# Frame sampling & detection - OPTIMIZED FOR BETTER COVERAGE
+stride: 1                         # process every frame for maximum detection (was: 2)
+det_size: [960, 960]              # RetinaFace detection resolution (w, h)
+face_conf_th: 0.30                # lowered from 0.40 - catch more faces with lower confidence
+person_conf_th: 0.10              # LOWERED from 0.15 - detect more people including partial views
+face_in_track_iou: 0.10           # Moderate - requires 10% overlap between face and person box
+allow_face_center: false          # disabled to avoid attaching wrong face within same box
+dilate_track_px: 0.15             # Moderate expansion to capture heads near person box edges
+temporal_iou_tolerance: 1         # Allow 1 frame lookback for matching
+
+# Harvest sampling - VERY PERMISSIVE FOR DEBUGGING
 samples_per_track: 12
-samples_min: 6
+samples_min: 4                # LOWERED to 4 to capture everyone
 samples_max: 16
 min_gap_frames: 8
-min_area_frac: 0.005
-min_area_px: null                 # override if using absolute pixel gate
-min_sharpness_laplacian: 50.0     # baseline sharpness for quality normalization (fixes discrimination between 200-400 range)
-sharpness_pctile: 20              # reject samples below this per-track sharpness percentile (lowered to capture more faces)
-min_frontalness: 0.25             # minimum frontalness for a sample to qualify (lowered to accept more angles)
+min_area_frac: 0.001          # VERY LOW - accept tiny faces
+min_area_px: null
+min_sharpness_laplacian: 20.0 # LOWERED - accept blurrier faces
+sharpness_pctile: 5           # Only reject worst 5%
+min_frontalness: 0.10         # LOWERED - accept more profile views
 frontal_pctile: 50                # ensure >= this percentile contributes to picks
 min_frontal_picks: 2
 profile_asymmetry_thresh: 0.35    # relaxed yaw tolerance to keep more faces
-quality_weights: [0.4, 0.4, 0.2]  # weights for [sharpness, frontalness, area closeness] - balanced for clear identifiable faces
+quality_weights: [0.5, 0.2, 0.3]  # adjusted: prioritize sharpness, then area, then frontalness
 target_area_frac: 0.02            # area fraction considered "ideal" for quality scoring
-debug_rejections: false           # opt-in detailed reject stats
+debug_rejections: true            # ENABLE to see rejection reasons
 multi_face_per_track_guard: true
 multi_face_tiebreak: quality
 fallback_head_pct: 0.4
@@ -46,5 +51,5 @@ flip_tolerance: 0.30
 # Identity change detection and splitting
 identity_split_min_frames: 5      # frames required to confirm a label change
 identity_change_margin: 0.05      # cosine margin new_label - old_label to allow split (lower = more sensitive)
-identity_split_enabled: true       # enable runtime identity splitting
+identity_split_enabled: false      # DISABLED for harvest - splits same person too aggressively
 embed_every_n: 2
