@@ -46,28 +46,6 @@ Based on the changes, you should see:
 - **Higher sample counts per track** (8-12 samples typically)
 - **Fewer "UNKNOWN" labels** in final output
 
-<<<<<<< HEAD
-## New Runtime Controls (Oct 2025)
-
-- `--threads N` caps CPU math/ONNX threads. The default is 1; `--fast` now forces 1 unless you override it explicitly.
-- `--fast` bundles: stride=2, RetinaFace 640×640, `--defer-embeddings`, `--threads 1`, and disables debug rejection crops.
-- `--defer-embeddings` skips ArcFace during harvest so you can generate embeddings later during clustering/facebank builds.
-- `--progress-interval` (percent) and `--heartbeat-sec` (seconds) tune log cadence. Default progress is 1% and heartbeat is 2 s.
-- Every harvest now writes `progress.json` alongside the crops, e.g.
-  ```json
-  {
-    "frames_total": 2479,
-    "frames_done": 123,
-    "percent": 4.96,
-    "tracks": 3,
-    "last_update": "2025-10-20T16:25:31Z"
-  }
-  ```
-  and emits heartbeats so you get feedback within the first ~10 s even on CPU-only runs.
-- Apple Silicon automatically prefers CoreML for RetinaFace and ArcFace; ONNX sessions fall back to CPU when CoreML is unavailable.
-
-=======
->>>>>>> origin/feat/identity-guard
 ## Quick Start - Test the Changes
 
 ### Option 1: Automated Workflow (Easiest)
@@ -76,11 +54,7 @@ Based on the changes, you should see:
 chmod +x scripts/harvest_workflow.sh
 
 # Run full workflow
-<<<<<<< HEAD
-./scripts/harvest_workflow.sh data/RHOBH-TEST-v2.mp4
-=======
 ./scripts/harvest_workflow.sh data/RHOBH-TEST.mp4
->>>>>>> origin/feat/identity-guard
 ```
 
 This will:
@@ -95,11 +69,7 @@ This will:
 #### Step 1: Diagnose
 ```bash
 python scripts/diagnose_harvest.py \
-<<<<<<< HEAD
-    --video data/RHOBH-TEST-v2.mp4 \
-=======
     --video data/RHOBH-TEST.mp4 \
->>>>>>> origin/feat/identity-guard
     --sample 100 \
     --output diagnostics/test
 ```
@@ -107,30 +77,15 @@ python scripts/diagnose_harvest.py \
 #### Step 2: Run Harvest
 ```bash
 python scripts/harvest_faces.py \
-<<<<<<< HEAD
-    data/RHOBH-TEST-v2.mp4 \
-    --person-weights models/weights/yolov8n.pt \
-    --harvest-dir data/harvest/RHOBH-TEST-v2 \
-    --threads 1 \
-    --progress-interval 1 \
-    --heartbeat-sec 2
-```
-Add `--fast` when you need a quick low-heat pass (stride = 2, RetinaFace 640, deferred embeddings).
-=======
     data/RHOBH-TEST.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --output-dir data/harvest
 ```
->>>>>>> origin/feat/identity-guard
 
 #### Step 3: Validate
 ```bash
 python scripts/validate_harvest.py \
-<<<<<<< HEAD
-    data/harvest/RHOBH-TEST-v2 \
-=======
     data/harvest/RHOBH-TEST \
->>>>>>> origin/feat/identity-guard
     --output diagnostics/validation
 ```
 
@@ -176,17 +131,10 @@ QUALITY METRICS:
 Try the permissive config:
 ```bash
 python scripts/harvest_faces.py \
-<<<<<<< HEAD
-    data/RHOBH-TEST-v2.mp4 \
-    --person-weights models/weights/yolov8n.pt \
-    --pipeline-config configs/pipeline_permissive.yaml \
-    --harvest-dir data/harvest/RHOBH-TEST-v2
-=======
     data/RHOBH-TEST.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --pipeline-config configs/pipeline_permissive.yaml \
     --output-dir data/harvest
->>>>>>> origin/feat/identity-guard
 ```
 
 ### "Too many low-quality faces"
@@ -205,20 +153,12 @@ Check diagnostics - look for high `no_track_association` count:
 - **Processing time:** ~2-3x slower with stride=1 (but only needs to run once per episode)
 - **Disk space:** More samples = more disk usage (typically 50-100MB per episode)
 - **Quality:** The optimized config maintains quality while increasing coverage
-<<<<<<< HEAD
-- **Monitoring:** Follow `progress.json` or terminal heartbeats (default 2 s cadence) to track long CPU-bound harvests.
-=======
->>>>>>> origin/feat/identity-guard
 
 ## Next Steps After Harvest
 
 1. **Review samples**: 
    ```bash
-<<<<<<< HEAD
-   ls data/harvest/RHOBH-TEST-v2/track_*/
-=======
    ls data/harvest/RHOBH-TEST/track_*/
->>>>>>> origin/feat/identity-guard
    ```
 
 2. **Build facebank**:
@@ -228,11 +168,7 @@ Check diagnostics - look for high `no_track_association` count:
 
 3. **Run full tracking**:
    ```bash
-<<<<<<< HEAD
-   python scripts/run_tracker.py data/RHOBH-TEST-v2.mp4 \
-=======
    python scripts/run_tracker.py data/RHOBH-TEST.mp4 \
->>>>>>> origin/feat/identity-guard
        --person-weights models/weights/yolov8n.pt \
        --facebank-parquet data/facebank.parquet
    ```
@@ -261,17 +197,10 @@ If you want to revert to original settings:
 ```bash
 # Use original config explicitly
 python scripts/harvest_faces.py \
-<<<<<<< HEAD
-    data/RHOBH-TEST-v2.mp4 \
-    --person-weights models/weights/yolov8n.pt \
-    --pipeline-config configs/pipeline_original.yaml \
-    --harvest-dir data/harvest/RHOBH-TEST-v2
-=======
     data/RHOBH-TEST.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --pipeline-config configs/pipeline_original.yaml \
     --output-dir data/harvest
->>>>>>> origin/feat/identity-guard
 
 # Or restore original as default
 cp configs/pipeline_original.yaml configs/pipeline.yaml
