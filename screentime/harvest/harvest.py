@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import logging
+<<<<<<< HEAD
 import os
 import time
 from collections import Counter, defaultdict, deque
@@ -11,6 +12,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
+=======
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+>>>>>>> origin/feat/identity-guard
 
 import cv2
 import numpy as np
@@ -20,12 +27,17 @@ from screentime.detectors.face_retina import RetinaFaceDetector
 from screentime.detectors.person_yolo import YOLOPersonDetector
 from screentime.io_utils import dump_json, ensure_dir, infer_video_stem
 from screentime.tracking.bytetrack_wrap import ByteTrackWrapper, TrackAccumulator, TrackObservation
+<<<<<<< HEAD
 from screentime.types import Detection, FaceSample, ManifestEntry, TrackState, bbox_area, iou
+=======
+from screentime.types import FaceSample, ManifestEntry, TrackState, bbox_area, iou
+>>>>>>> origin/feat/identity-guard
 from screentime.recognition.embed_arcface import ArcFaceEmbedder
 
 LOGGER = logging.getLogger("screentime.harvest")
 
 
+<<<<<<< HEAD
 def _flush_logger(logger: logging.Logger) -> None:
     """Best-effort flush of attached handlers to surface logs promptly."""
     for handler in logger.handlers:
@@ -37,6 +49,8 @@ def _flush_logger(logger: logging.Logger) -> None:
                 continue
 
 
+=======
+>>>>>>> origin/feat/identity-guard
 @dataclass
 class HarvestConfig:
     stride: int = 1
@@ -46,7 +60,10 @@ class HarvestConfig:
     min_gap_frames: int = 8
     min_area_frac: float = 0.005
     min_area_px: Optional[float] = None
+<<<<<<< HEAD
     min_face_px: int = 0
+=======
+>>>>>>> origin/feat/identity-guard
     min_sharpness_laplacian: Optional[float] = None
     min_sharpness_pct: Optional[float] = None
     sharpness_pctile: Optional[float] = 40.0
@@ -67,6 +84,7 @@ class HarvestConfig:
     # Identity purity guard across frames
     identity_guard: bool = True
     identity_split: bool = True
+<<<<<<< HEAD
     identity_sim_threshold: float = 0.55
     identity_min_picks: int = 3
     identity_guard_stride: int = 6
@@ -93,6 +111,13 @@ class HarvestConfig:
     stitch_sim: float = 0.45
     stitch_gap_ms: float = 8000.0
     stitch_min_iou: float = 0.1
+=======
+    identity_sim_threshold: float = 0.62
+    identity_min_picks: int = 3
+    # Reindex harvest folders independent of ByteTrack ids
+    reindex_harvest_tracks: bool = True
+    fast_mode: bool = False
+>>>>>>> origin/feat/identity-guard
 
 
 @dataclass
@@ -115,6 +140,7 @@ class AssignedFace:
     score: float
     person_bbox: Tuple[float, float, float, float]
     frame_offset: int = 0
+<<<<<<< HEAD
     cosine_similarity: Optional[float] = None
 
 
@@ -163,6 +189,8 @@ class StitchedTrack:
     avg_area: float
     start_ts_ms: float
     end_ts_ms: float
+=======
+>>>>>>> origin/feat/identity-guard
 
 
 @dataclass
@@ -233,11 +261,14 @@ class TrackSamplingState:
             eligible_candidates.append(candidate)
 
         if not eligible_candidates:
+<<<<<<< HEAD
             if sorted_candidates:
                 fallback = sorted_candidates[0]
                 fallback.picked = True
                 fallback.reason = fallback.reason or "picked_low_quality"
                 return [fallback.sample]
+=======
+>>>>>>> origin/feat/identity-guard
             return []
 
         required = min(config.samples_per_track, len(eligible_candidates))
@@ -314,7 +345,11 @@ class TrackSamplingState:
                 "area_frac": candidate.area_frac,
                 "picked": candidate.picked,
                 "reason": candidate.reason or ("picked" if candidate.picked else "not_selected"),
+<<<<<<< HEAD
                 "path": str(candidate.sample.path) if candidate.picked else "",
+=======
+                "path": str(candidate.sample.path),
+>>>>>>> origin/feat/identity-guard
                 "association_iou": candidate.sample.association_iou,
                 "match_mode": candidate.sample.match_mode,
                 "frame_offset": candidate.sample.match_frame_offset,
@@ -344,6 +379,7 @@ class HarvestRunner:
 
     def run(self, video_path: Path, output_root: Path) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
+<<<<<<< HEAD
         need_embedder = self.config.identity_guard or not self.config.defer_embeddings
         if need_embedder and self.embedder is None:
             try:
@@ -353,6 +389,16 @@ class HarvestRunner:
                 self.embedder = None
                 if self.config.identity_guard:
                     self.config.identity_guard = False
+=======
+        if self.config.identity_guard and self.embedder is None:
+            try:
+                self.embedder = ArcFaceEmbedder()
+            except Exception as exc:  # pragma: no cover - runtime guard
+                LOGGER.warning("ArcFace embedder unavailable (%s); disabling identity_guard for this run", exc)
+                self.embedder = None
+                # disable guard for current run to avoid errors
+                self.config.identity_guard = False
+>>>>>>> origin/feat/identity-guard
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video {video_path}")
@@ -365,6 +411,7 @@ class HarvestRunner:
         self.tracker.set_frame_rate(fps)
 
         video_stem = infer_video_stem(video_path)
+<<<<<<< HEAD
         harvest_dir = ensure_dir(output_root)
         crops_dir = harvest_dir
         candidates_root = harvest_dir / "candidates"
@@ -375,6 +422,14 @@ class HarvestRunner:
         def _candidate_dir(track_id: int) -> Path:
             if not self.config.write_candidates:
                 return candidates_root / f"track_{track_id:04d}"
+=======
+        harvest_dir = ensure_dir(output_root / video_stem)
+        crops_dir = ensure_dir(harvest_dir)
+        candidates_root = ensure_dir(harvest_dir / "candidates")
+        candidate_dirs: Dict[int, Path] = {}
+
+        def _candidate_dir(track_id: int) -> Path:
+>>>>>>> origin/feat/identity-guard
             track_dir = candidate_dirs.get(track_id)
             if track_dir is None:
                 track_dir = ensure_dir(candidates_root / f"track_{track_id:04d}")
@@ -382,7 +437,11 @@ class HarvestRunner:
             return track_dir
 
         def save_candidate_image(image: Optional[np.ndarray], track_id: int, frame_idx: int) -> None:
+<<<<<<< HEAD
             if not self.config.write_candidates or image is None:
+=======
+            if image is None:
+>>>>>>> origin/feat/identity-guard
                 return
             track_dir = _candidate_dir(track_id)
             candidate_path = track_dir / f"F{frame_idx:06d}.jpg"
@@ -390,17 +449,24 @@ class HarvestRunner:
 
         accumulator = TrackAccumulator()
         sampling_states: Dict[int, TrackSamplingState] = {}
+<<<<<<< HEAD
         selection_map: Dict[int, List[FaceSample]] = {}
+=======
+>>>>>>> origin/feat/identity-guard
         debug_records: Dict[str, List[Dict]] = defaultdict(list)
         reject_counter: Counter[str] = Counter()
         frame_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         candidate_event_lookup: Dict[Tuple[int, int], Dict[str, Any]] = {}
         debug_write_queue: List[Tuple[np.ndarray, Path]] = []
+<<<<<<< HEAD
         candidate_rows: List[Dict[str, Any]] = []
+=======
+>>>>>>> origin/feat/identity-guard
 
         # Identity guard state
         guard_centroid: Dict[int, np.ndarray] = {}
         guard_count: Dict[int, int] = {}
+<<<<<<< HEAD
         guard_last_frame: Dict[int, int] = {}
         guard_pending: Dict[int, PendingGuardState] = {}
         guard_embeddings: Dict[int, List[np.ndarray]] = defaultdict(list)
@@ -418,6 +484,14 @@ class HarvestRunner:
         byte_to_harvest: Dict[int, int] = {}
         harvest_source_byte: Dict[int, Optional[int]] = {}
         recall_tracks: Dict[int, Dict[str, Any]] = {}
+=======
+        split_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+
+        # Harvest track namespace mapping
+        next_harvest_id = 1
+        byte_to_harvest: Dict[int, int] = {}
+        harvest_source_byte: Dict[int, int] = {}
+>>>>>>> origin/feat/identity-guard
 
         def _new_harvest_id() -> int:
             nonlocal next_harvest_id
@@ -430,6 +504,7 @@ class HarvestRunner:
             den = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
             return num / den
 
+<<<<<<< HEAD
         def _normalize(vec: np.ndarray) -> np.ndarray:
             norm = float(np.linalg.norm(vec)) + 1e-9
             return vec / norm
@@ -815,6 +890,8 @@ class HarvestRunner:
 
         write_progress(0, current_track_count())
 
+=======
+>>>>>>> origin/feat/identity-guard
         frame_idx = -1
         processed_frames = 0
 
@@ -825,6 +902,7 @@ class HarvestRunner:
             frame_count or "unknown",
             harvest_dir,
         )
+<<<<<<< HEAD
         _flush_logger(LOGGER)
 
         def emit_status(frames_seen: int, processed: int, heartbeat: bool) -> None:
@@ -898,6 +976,41 @@ class HarvestRunner:
             if heartbeat_seconds > 0 and now - last_heartbeat_ts >= heartbeat_seconds:
                 emit_status(frames_seen, processed, heartbeat=True)
                 last_heartbeat_ts = now
+=======
+        if frame_count:
+            progress_step = max(1, frame_count // 20)  # ~5% increments
+        else:
+            progress_step = 500  # fallback when frame count is unknown
+        next_progress_log = progress_step
+        last_frames_seen = 0
+
+        def log_progress(frames_seen: int) -> None:
+            nonlocal next_progress_log
+            if frames_seen < next_progress_log:
+                return
+            pct = (frames_seen / frame_count * 100.0) if frame_count else None
+            samples_total = sum(len(state.candidates) for state in sampling_states.values())
+            if pct is not None:
+                LOGGER.info(
+                    "Harvest progress %.1f%% (%d/%d frames seen, processed=%d, active_tracks=%d, samples=%d)",
+                    pct,
+                    frames_seen,
+                    frame_count,
+                    processed_frames,
+                    len(accumulator.active),
+                    samples_total,
+                )
+            else:
+                LOGGER.info(
+                    "Harvest progress: %d frames seen (processed=%d, active_tracks=%d, samples=%d)",
+                    frames_seen,
+                    processed_frames,
+                    len(accumulator.active),
+                    samples_total,
+                )
+            while next_progress_log <= frames_seen:
+                next_progress_log += progress_step
+>>>>>>> origin/feat/identity-guard
 
         def log_frame_event(frame_idx: int, payload: Dict[str, Any]) -> None:
             event = dict(payload)
@@ -940,8 +1053,13 @@ class HarvestRunner:
                 break
             frame_idx += 1
             frames_seen = frame_idx + 1
+<<<<<<< HEAD
             maybe_emit_status(frames_seen, processed_frames)
             if frame_idx % self.config.stride != 0:
+=======
+            if frame_idx % self.config.stride != 0:
+                log_progress(frames_seen)
+>>>>>>> origin/feat/identity-guard
                 continue
 
             processed_frames += 1
@@ -950,6 +1068,7 @@ class HarvestRunner:
             person_dets = self.person_detector.detect(frame, frame_idx)
             observations = self.tracker.update(person_dets, frame.shape)
             accumulator.update(frame_idx, timestamp_ms, observations)
+<<<<<<< HEAD
             active_ids = set(accumulator.active.keys())
             for tid in list(track_pending_frames.keys()):
                 if tid not in active_ids:
@@ -989,6 +1108,11 @@ class HarvestRunner:
             if face_dets:
                 for idx, face in enumerate(face_dets):
                     face_contexts[idx] = _build_detection_context(face)
+=======
+            track_lookup = {obs.track_id: obs for obs in observations}
+
+            face_dets = self.face_detector.detect(frame, frame_idx)
+>>>>>>> origin/feat/identity-guard
             assignments: Dict[int, AssignedFace] = {}
             unmatched_faces = set(range(len(face_dets)))
 
@@ -1033,8 +1157,11 @@ class HarvestRunner:
                 cost = np.full((num_faces, num_tracks), fill_value=1e6, dtype=np.float32)
 
                 for i, face in enumerate(face_dets):
+<<<<<<< HEAD
                     ctx = face_contexts.get(i)
                     ctx_embedding = ctx.embedding if ctx else None
+=======
+>>>>>>> origin/feat/identity-guard
                     for j, track_id in enumerate(track_ids):
                         best_overlap = 0.0
                         best_bbox: Optional[Tuple[float, float, float, float]] = None
@@ -1051,16 +1178,21 @@ class HarvestRunner:
                                 best_overlap = overlap
                                 best_bbox = cand_bbox
                                 best_offset = frame_offset
+<<<<<<< HEAD
                         cosine: Optional[float] = None
                         if best_bbox is not None:
                             hid = byte_to_harvest.get(track_id)
                             centroid = guard_centroid.get(hid) if hid is not None else None
                             if centroid is not None and ctx_embedding is not None:
                                 cosine = _cosine(ctx_embedding, centroid)
+=======
+                        if best_bbox is not None:
+>>>>>>> origin/feat/identity-guard
                             match_meta[(i, j)] = {
                                 "overlap": float(best_overlap),
                                 "person_bbox": best_bbox,
                                 "frame_offset": int(best_offset),
+<<<<<<< HEAD
                                 "cosine": float(cosine) if cosine is not None else None,
                             }
                         if best_overlap >= self.config.face_in_track_iou and best_bbox is not None:
@@ -1072,6 +1204,11 @@ class HarvestRunner:
                                 cost[i, j] = float(0.6 * base_cost + 0.4 * identity_component)
                             else:
                                 cost[i, j] = float(base_cost)
+=======
+                            }
+                        if best_overlap >= self.config.face_in_track_iou:
+                            cost[i, j] = -best_overlap
+>>>>>>> origin/feat/identity-guard
 
                 if np.any(cost < 1e6):
                     row_ind, col_ind = linear_sum_assignment(cost)
@@ -1089,7 +1226,10 @@ class HarvestRunner:
                             score=float(face_dets[r].score),
                             person_bbox=tuple(meta["person_bbox"]),
                             frame_offset=meta["frame_offset"],
+<<<<<<< HEAD
                             cosine_similarity=float(meta["cosine"]) if meta.get("cosine") is not None else None,
+=======
+>>>>>>> origin/feat/identity-guard
                         )
                         existing = assignments.get(track_id)
                         if not self.config.multi_face_per_track_guard or existing is None:
@@ -1118,7 +1258,10 @@ class HarvestRunner:
                             score=float(face_dets[face_idx].score),
                             person_bbox=obs.bbox,
                             frame_offset=0,
+<<<<<<< HEAD
                             cosine_similarity=None,
+=======
+>>>>>>> origin/feat/identity-guard
                         )
                         assignments[track_id] = candidate
                         unmatched_faces.discard(face_idx)
@@ -1145,6 +1288,7 @@ class HarvestRunner:
                     },
                 )
 
+<<<<<<< HEAD
             def emit_sample(
                 harvest_id: int,
                 byte_id: Optional[int],
@@ -1171,18 +1315,45 @@ class HarvestRunner:
                 sample_path, debug_path = resolve_paths(hid, byte_id)
 
                 if not self._passes_area_threshold(face_det.bbox, frame_area):
+=======
+            for byte_id, assignment in assignments.items():
+                hid = byte_to_harvest.get(byte_id)
+                if hid is None:
+                    hid = _new_harvest_id()
+                    byte_to_harvest[byte_id] = hid
+                    harvest_source_byte[hid] = byte_id
+                else:
+                    harvest_source_byte.setdefault(hid, byte_id)
+
+                face = face_dets[assignment.face_idx]
+                harvest_dirname = (
+                    f"track_{hid:04d}" if self.config.reindex_harvest_tracks else f"track_{byte_id:04d}"
+                )
+                sample_filename = f"{video_stem}_f{frame_idx:06d}.jpg"
+                sample_path = crops_dir / harvest_dirname / sample_filename
+                debug_path = crops_dir / harvest_dirname / "debug" / sample_filename
+
+                if not self._passes_area_threshold(face.bbox, frame_area):
+>>>>>>> origin/feat/identity-guard
                     record_reject(
                         hid,
                         "rejected_area",
                         frame_idx,
                         {
+<<<<<<< HEAD
                             "bbox_area": bbox_area(face_det.bbox),
                             "frame_area": frame_area,
                             "face_bbox": list(map(float, face_det.bbox)),
+=======
+                            "bbox_area": bbox_area(face.bbox),
+                            "frame_area": frame_area,
+                            "face_bbox": list(map(float, face.bbox)),
+>>>>>>> origin/feat/identity-guard
                             "person_bbox": list(map(float, assignment.person_bbox)),
                             "byte_track_id": byte_id,
                         },
                     )
+<<<<<<< HEAD
                     return False, hid
 
                 if not self._passes_face_size(face_det.bbox):
@@ -1225,6 +1396,15 @@ class HarvestRunner:
                 area = bbox_area(face_det.bbox)
                 area_frac = area / frame_area if frame_area else 0.0
                 orientation, frontalness = self._orientation_metrics(face_det.landmarks)
+=======
+                    continue
+
+                aligned = self.face_detector.align_to_112(frame, face.landmarks, face.bbox)
+                sharpness = self._compute_sharpness(aligned)
+                area = bbox_area(face.bbox)
+                area_frac = area / frame_area if frame_area else 0.0
+                orientation, frontalness = self._orientation_metrics(face.landmarks)
+>>>>>>> origin/feat/identity-guard
                 quality = self._score_quality(sharpness, frontalness, area_frac)
 
                 if frontalness < self.config.min_frontalness:
@@ -1239,7 +1419,11 @@ class HarvestRunner:
                         },
                     )
                     queue_debug_image(aligned, debug_path)
+<<<<<<< HEAD
                     return False, hid
+=======
+                    continue
+>>>>>>> origin/feat/identity-guard
 
                 if not self._passes_sharpness_threshold(sharpness):
                     record_reject(
@@ -1248,22 +1432,35 @@ class HarvestRunner:
                         frame_idx,
                         {
                             "sharpness": float(sharpness),
+<<<<<<< HEAD
                             "min_sharpness": self.config.min_sharpness_laplacian,
+=======
+>>>>>>> origin/feat/identity-guard
                             "byte_track_id": byte_id,
                         },
                     )
                     queue_debug_image(aligned, debug_path)
+<<<<<<< HEAD
                     return False, hid
 
                 timestamp_ms = frame_idx / fps * 1000.0 if fps else 0.0
+=======
+                    continue
+
+>>>>>>> origin/feat/identity-guard
                 face_sample = FaceSample(
                     track_id=hid,
                     byte_track_id=byte_id,
                     frame_idx=frame_idx,
                     timestamp_ms=timestamp_ms,
                     path=sample_path,
+<<<<<<< HEAD
                     score=face_det.score,
                     bbox=face_det.bbox,
+=======
+                    score=face.score,
+                    bbox=face.bbox,
+>>>>>>> origin/feat/identity-guard
                     quality=quality,
                     sharpness=sharpness,
                     orientation=orientation,
@@ -1276,6 +1473,7 @@ class HarvestRunner:
                     image=aligned,
                 )
 
+<<<<<<< HEAD
                 embed_provider = face_ctx.provider
                 raw_embedding = face_ctx.embedding.copy() if face_ctx.embedding is not None else None
                 guard_embedding = face_ctx.embedding
@@ -1336,6 +1534,63 @@ class HarvestRunner:
                             assignment.cosine_similarity = sim
                         if sim < violation_threshold:
                             if not self.config.identity_split:
+=======
+                embedding = None
+                embed_provider = None
+                try:
+                    if self.embedder is not None:
+                        embedding = self.embedder.embed(aligned)
+                        embed_provider = getattr(self.embedder, "backend", None)
+                        if not embed_provider and hasattr(self.embedder, "providers"):
+                            providers = list(getattr(self.embedder, "providers"))
+                            embed_provider = providers[0] if providers else None
+                except Exception as exc:  # pragma: no cover - defensive runtime guard
+                    LOGGER.warning("Embedding failed for track %s frame %s: %s", hid, frame_idx, exc)
+                    embedding = None
+                face_sample.embedding = embedding
+                face_sample.provider = embed_provider
+
+                need_guard_update = embedding is not None
+                sim = None
+                if (
+                    self.config.identity_guard
+                    and embedding is not None
+                    and guard_count.get(hid, 0) >= self.config.identity_min_picks
+                ):
+                    centroid = guard_centroid.get(hid)
+                    if centroid is not None:
+                        sim = _cosine(embedding, centroid)
+                        face_sample.identity_cosine = sim
+                        if sim < self.config.identity_sim_threshold:
+                            if self.config.identity_split:
+                                prev_hid = hid
+                                hid = _new_harvest_id()
+                                byte_to_harvest[byte_id] = hid
+                                harvest_source_byte[hid] = byte_id
+                                harvest_dirname = (
+                                    f"track_{hid:04d}"
+                                    if self.config.reindex_harvest_tracks
+                                    else f"track_{byte_id:04d}"
+                                )
+                                sample_path = crops_dir / harvest_dirname / sample_filename
+                                debug_path = crops_dir / harvest_dirname / "debug" / sample_filename
+                                face_sample.track_id = hid
+                                face_sample.path = sample_path
+                                face_sample.identity_cosine = sim
+                                guard_centroid[hid] = embedding.copy()
+                                guard_count[hid] = 1
+                                need_guard_update = False
+                                payload = {
+                                    "event": "identity_split",
+                                    "track_id": hid,
+                                    "byte_track_id": byte_id,
+                                    "prev_harvest_id": prev_hid,
+                                    "cosine_sim": float(sim),
+                                }
+                                log_frame_event(frame_idx, payload)
+                                split_events[byte_id].append({"frame": frame_idx, **payload})
+                            else:
+>>>>>>> origin/feat/identity-guard
                                 record_reject(
                                     hid,
                                     "rejected_identity_purity",
@@ -1343,6 +1598,7 @@ class HarvestRunner:
                                     {
                                         "byte_track_id": byte_id,
                                         "cosine_sim": float(sim),
+<<<<<<< HEAD
                                         "threshold": violation_threshold,
                                     },
                                 )
@@ -1626,12 +1882,128 @@ class HarvestRunner:
                 prev_id = event.get("prev_harvest_id")
                 if isinstance(prev_id, int) and prev_id in old_to_new:
                     event["prev_harvest_id"] = old_to_new[prev_id]
+=======
+                                        "threshold": self.config.identity_sim_threshold,
+                                    },
+                                )
+                                queue_debug_image(aligned, debug_path)
+                                continue
+                else:
+                    face_sample.identity_cosine = sim
+
+                record_candidate_event(
+                    face_sample.track_id,
+                    frame_idx,
+                    {
+                        "reason": "candidate",
+                        "byte_track_id": byte_id,
+                        "face_bbox": list(map(float, face.bbox)),
+                        "person_bbox": list(map(float, assignment.person_bbox)),
+                        "association_iou": float(assignment.overlap),
+                        "sharpness": float(sharpness),
+                        "frontalness": float(frontalness),
+                        "quality": float(quality),
+                        "area_frac": float(area_frac),
+                        "match_mode": assignment.mode,
+                        "frame_offset": int(assignment.frame_offset),
+                        "path": str(face_sample.path),
+                        "identity_cosine": face_sample.identity_cosine,
+                        "provider": embed_provider,
+                    },
+                )
+                save_candidate_image(face_sample.image, face_sample.track_id, face_sample.frame_idx)
+
+                sampling_state = sampling_states.setdefault(face_sample.track_id, TrackSamplingState())
+                removed = sampling_state.add_candidate(
+                    face_sample,
+                    quality,
+                    sharpness,
+                    frontalness,
+                    area_frac,
+                    orientation,
+                    self.config,
+                )
+                if removed is not None:
+                    removed_event = candidate_event_lookup.get((removed.track_id, removed.frame_idx))
+                    if removed_event:
+                        removed_event["reason"] = "rejected_quality"
+                        removed_event["picked"] = False
+                    record_reject(
+                        removed.track_id,
+                        "rejected_quality",
+                        removed.frame_idx,
+                        {
+                            "quality": float(removed.quality),
+                            "orientation": removed.orientation,
+                            "face_bbox": list(map(float, removed.bbox)),
+                            "person_bbox": list(map(float, removed.person_bbox)),
+                        },
+                    )
+                    if removed.image is not None:
+                        debug_removed_dir = removed.path.parent / "debug"
+                        debug_removed_path = debug_removed_dir / removed.path.name
+                        queue_debug_image(removed.image, debug_removed_path)
+                        removed.image = None
+
+                if need_guard_update and embedding is not None:
+                    centroid = guard_centroid.get(face_sample.track_id)
+                    if centroid is None:
+                        guard_centroid[face_sample.track_id] = embedding.copy()
+                        guard_count[face_sample.track_id] = 1
+                    else:
+                        n = guard_count.get(face_sample.track_id, 0)
+                        guard_centroid[face_sample.track_id] = (centroid * n + embedding) / (n + 1)
+                        guard_count[face_sample.track_id] = n + 1
+
+            log_progress(frames_seen)
+            last_frames_seen = frames_seen
+
+        if last_frames_seen:
+            if last_frames_seen < next_progress_log:
+                next_progress_log = last_frames_seen
+            log_progress(last_frames_seen)
+
+        cap.release()
+        finished_tracks = accumulator.flush()
+
+        selection_map: Dict[int, List[FaceSample]] = {}
+        candidate_rows: List[Dict[str, Any]] = []
+        for hid, state in sampling_states.items():
+            selected = state.export_samples(self.config)
+            selection_map[hid] = selected
+            for candidate in state.candidates:
+                event = candidate_event_lookup.get((hid, candidate.sample.frame_idx))
+                if event:
+                    event["reason"] = candidate.reason or ("picked" if candidate.picked else "not_selected")
+                    event["picked"] = candidate.picked
+                    event["quality"] = candidate.quality
+                    event["sharpness"] = candidate.sharpness
+                    event["frontalness"] = candidate.frontalness
+                    event["area_frac"] = candidate.area_frac
+                    event.setdefault("association_iou", candidate.sample.association_iou)
+                if candidate.reason and candidate.reason.startswith("rejected_"):
+                    reject_counter[candidate.reason] += 1
+                if not candidate.picked:
+                    if event is not None:
+                        event["path"] = None
+                    if self.config.debug_rejections:
+                        debug_path = candidate.sample.path.parent / "debug" / candidate.sample.path.name
+                        queue_debug_image(candidate.sample.image, debug_path)
+                    candidate.sample.image = None
+                else:
+                    if event is not None:
+                        event["path"] = str(candidate.sample.path)
+        # Ensure keys present
+        for hid in list(sampling_states.keys()):
+            selection_map.setdefault(hid, [])
+>>>>>>> origin/feat/identity-guard
 
         for hid, state in sampling_states.items():
             candidate_rows.extend(state.iter_debug_rows(hid))
 
         # Persist selected samples and compute track-level similarities
         total_selected = 0
+<<<<<<< HEAD
         stitched_lookup: Dict[int, StitchedTrack] = {track.super_id: track for track in stitched_tracks}
         for stitched in stitched_tracks:
             samples = stitched.samples
@@ -1651,10 +2023,20 @@ class HarvestRunner:
                 harvest_dirname = f"track_{byte_id:04d}"
             else:
                 harvest_dirname = f"track_{stitched.super_id:04d}"
+=======
+        for hid, samples in selection_map.items():
+            if not samples:
+                continue
+            byte_id = harvest_source_byte.get(hid)
+            harvest_dirname = f"track_{hid:04d}" if self.config.reindex_harvest_tracks else (
+                f"track_{byte_id:04d}" if byte_id is not None else f"track_{hid:04d}"
+            )
+>>>>>>> origin/feat/identity-guard
             track_dir = ensure_dir(crops_dir / harvest_dirname)
 
             embeddings: List[np.ndarray] = []
             for sample in samples:
+<<<<<<< HEAD
                 sample_filename = sample.path.name
                 sample.path = track_dir / sample_filename
                 if sample.embedding is None and self.embedder is not None and sample.image is not None and not self.config.defer_embeddings:
@@ -1667,6 +2049,13 @@ class HarvestRunner:
                             sample.frame_idx,
                             exc,
                         )
+=======
+                if sample.embedding is None and self.embedder is not None and sample.image is not None:
+                    try:
+                        sample.embedding = self.embedder.embed(sample.image)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        LOGGER.warning("Post-filter embedding failed for track %s frame %s: %s", hid, sample.frame_idx, exc)
+>>>>>>> origin/feat/identity-guard
                         sample.embedding = None
                 if sample.embedding is not None:
                     embeddings.append(sample.embedding)
@@ -1684,12 +2073,15 @@ class HarvestRunner:
                 if sample.image is not None:
                     cv2.imwrite(str(sample.path), sample.image)
                     sample.image = None
+<<<<<<< HEAD
                 abs_path = sample.path if sample.path.is_absolute() else (target_dir / sample.path.name).resolve()
                 try:
                     rel_path = abs_path.relative_to(harvest_dir)
                 except ValueError:
                     rel_path = Path(os.path.relpath(abs_path, harvest_dir))
                 sample.path = rel_path
+=======
+>>>>>>> origin/feat/identity-guard
 
             total_selected += len(samples)
 
@@ -1701,6 +2093,7 @@ class HarvestRunner:
             debug_write_queue.clear()
 
         # Build manifest per harvest id, carrying source ByteTrack id
+<<<<<<< HEAD
         manifest_entries: List[ManifestEntry] = []
         for stitched in stitched_tracks:
             samples = stitched.samples
@@ -1715,6 +2108,21 @@ class HarvestRunner:
                 avg_area=stitched.avg_area,
                 first_ts_ms=stitched.start_ts_ms,
                 last_ts_ms=stitched.end_ts_ms,
+=======
+        track_by_id: Dict[int, TrackState] = {t.track_id: t for t in finished_tracks}
+        manifest_entries: List[ManifestEntry] = []
+        for hid, samples in selection_map.items():
+            byte_id = harvest_source_byte.get(hid)
+            track_state = track_by_id.get(byte_id) if byte_id is not None else None
+            entry = ManifestEntry(
+                track_id=hid,
+                byte_track_id=byte_id,
+                total_frames=track_state.duration_frames if track_state else 0,
+                avg_conf=track_state.avg_score if track_state else 0.0,
+                avg_area=float(np.mean([bbox_area(b) for b in track_state.bboxes])) if track_state and track_state.bboxes else 0.0,
+                first_ts_ms=track_state.timestamps_ms[0] if track_state and track_state.timestamps_ms else 0.0,
+                last_ts_ms=track_state.timestamps_ms[-1] if track_state and track_state.timestamps_ms else 0.0,
+>>>>>>> origin/feat/identity-guard
                 samples=samples,
             )
             manifest_entries.append(entry)
@@ -1745,6 +2153,7 @@ class HarvestRunner:
             with selected_csv.open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
+<<<<<<< HEAD
                 normalized_rows = []
                 for row in candidate_rows:
                     row_copy = dict(row)
@@ -1755,6 +2164,9 @@ class HarvestRunner:
                         row_copy["path"] = ""
                     normalized_rows.append(row_copy)
                 writer.writerows(normalized_rows)
+=======
+                writer.writerows(candidate_rows)
+>>>>>>> origin/feat/identity-guard
             LOGGER.info("Harvest selection summary written to %s", selected_csv)
 
         if self.config.debug_rejections:
@@ -1788,6 +2200,7 @@ class HarvestRunner:
             return False
         return True
 
+<<<<<<< HEAD
     def _passes_face_size(self, bbox) -> bool:
         min_px = max(0, int(self.config.min_face_px))
         if min_px <= 0:
@@ -1797,6 +2210,8 @@ class HarvestRunner:
         height = max(0.0, y2 - y1)
         return min(width, height) >= float(min_px)
 
+=======
+>>>>>>> origin/feat/identity-guard
     def _passes_sharpness_threshold(self, sharpness: float) -> bool:
         if self.config.min_sharpness_laplacian is None:
             return True

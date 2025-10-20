@@ -23,6 +23,7 @@ class TrackAssignment:
     sources: List[str]
     destinations: List[str]
 
+<<<<<<< HEAD
 def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
     """Load clusters.json if present; returns {cluster_id: [track_ids]} mapping."""
     cluster_path = harvest_dir / "clusters.json"
@@ -43,6 +44,8 @@ def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
     return clusters
 
 
+=======
+>>>>>>> origin/feat/identity-guard
 
 def list_harvest_stems(harvest_root: Path) -> List[str]:
     """Return sorted harvest directory names under the given root."""
@@ -69,6 +72,7 @@ def load_manifest(harvest_dir: Path) -> pd.DataFrame:
     return df
 
 
+<<<<<<< HEAD
 def load_progress(harvest_dir: Path) -> Optional[Dict[str, object]]:
     """Load progress.json for a harvest if present."""
     progress_path = harvest_dir / "progress.json"
@@ -95,6 +99,8 @@ def load_progress(harvest_dir: Path) -> Optional[Dict[str, object]]:
     return result
 
 
+=======
+>>>>>>> origin/feat/identity-guard
 def _infer_track_id(track_dir: Path) -> int:
     try:
         return int(track_dir.name.split("_", 1)[-1])
@@ -149,6 +155,7 @@ def _frame_from_name(stem: str) -> Optional[int]:
     return None
 
 
+<<<<<<< HEAD
 def _resolve_sample_path(original_path: Path, row: pd.Series, harvest_dir: Path) -> Path:
     """Return a path that exists on disk, falling back to candidate/debug crops."""
     if original_path.is_absolute() and original_path.exists():
@@ -188,6 +195,8 @@ def _resolve_sample_path(original_path: Path, row: pd.Series, harvest_dir: Path)
     return direct_candidate if direct_candidate.exists() else original_path
 
 
+=======
+>>>>>>> origin/feat/identity-guard
 def load_samples(harvest_dir: Path) -> pd.DataFrame:
     """Load selected samples, falling back to scanning directories if CSV missing."""
     csv_path = harvest_dir / "selected_samples.csv"
@@ -243,11 +252,14 @@ def load_samples(harvest_dir: Path) -> pd.DataFrame:
         samples_df["byte_track_id"] = samples_df["track_id"]
     if "frame" not in samples_df.columns:
         samples_df["frame"] = samples_df["path"].map(lambda p: _frame_from_name(Path(p).stem))
+<<<<<<< HEAD
     if not samples_df.empty:
         samples_df["path"] = samples_df.apply(
             lambda row: str(_resolve_sample_path(Path(str(row.get("path", ""))), row, harvest_dir)),
             axis=1,
         )
+=======
+>>>>>>> origin/feat/identity-guard
     return samples_df
 
 

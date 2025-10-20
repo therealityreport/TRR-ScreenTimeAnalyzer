@@ -12,7 +12,11 @@
 python scripts/harvest_faces.py VIDEO.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --retina-det-size 640 640 \
+<<<<<<< HEAD
     --harvest-dir data/harvest/VIDEO
+=======
+    --output-dir data/harvest
+>>>>>>> origin/feat/identity-guard
 ```
 **Pros:** 2-3x faster than CPU, cooler  
 **Cons:** May miss some distant faces
@@ -27,7 +31,11 @@ python scripts/harvest_faces.py VIDEO.mp4 \
     --retina-det-size 640 640 \
     --fast \
     --onnx-providers CPUExecutionProvider \
+<<<<<<< HEAD
     --harvest-dir data/harvest/VIDEO
+=======
+    --output-dir data/harvest
+>>>>>>> origin/feat/identity-guard
 ```
 **Pros:** Coolest, most stable  
 **Cons:** Slowest

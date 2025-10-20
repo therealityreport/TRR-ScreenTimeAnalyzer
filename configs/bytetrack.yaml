@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 match_thresh: 0.80
 track_buffer: 35
 track_thresh: 0.65
@@ -6,3 +7,12 @@ conf_thres: 0.10
 fuse_score: true
 track_low_thresh: 0.10
 new_track_thresh: 0.60
+=======
+track_buffer: 600     # Keep tracks alive for ~25 seconds (600 frames @ 24fps) - handles long cutaways in reality TV
+match_thresh: 0.75    # More lenient matching to help re-associate after cutaways
+conf_thres: 0.1
+fuse_score: true
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+>>>>>>> origin/feat/identity-guard

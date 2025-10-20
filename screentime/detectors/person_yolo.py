@@ -32,6 +32,7 @@ class YOLOPersonDetector:
             ) from exc
 
         self.model = YOLO(weights)
+<<<<<<< HEAD
         resolved_device = device
         if resolved_device is None:
             try:
@@ -54,12 +55,20 @@ class YOLOPersonDetector:
                 )
                 resolved_device = None
         self.device = resolved_device or "auto"
+=======
+        if device:
+            self.model.to(device)
+>>>>>>> origin/feat/identity-guard
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         LOGGER.info(
             "Loaded YOLO person detector weights=%s device=%s conf=%.2f",
             weights,
+<<<<<<< HEAD
             self.device,
+=======
+            device or "auto",
+>>>>>>> origin/feat/identity-guard
             conf_thres,
         )
 

@@ -9,7 +9,11 @@ If you're getting `ModuleNotFoundError: No module named 'screentime'`, use this 
 export PYTHONPATH="${PWD}:${PYTHONPATH}"
 
 # Now run scripts normally
+<<<<<<< HEAD
 python scripts/diagnose_harvest.py --video data/RHOBH-TEST-v2.mp4 --sample 100
+=======
+python scripts/diagnose_harvest.py --video data/RHOBH-TEST.mp4 --sample 100
+>>>>>>> origin/feat/identity-guard
 ```
 
 Or source the helper script:
@@ -34,8 +38,13 @@ pip install -e .
 
 After this, you can run scripts from anywhere:
 ```bash
+<<<<<<< HEAD
 python scripts/diagnose_harvest.py --video data/RHOBH-TEST-v2.mp4 --sample 100
 python scripts/validate_harvest.py data/harvest/RHOBH-TEST-v2
+=======
+python scripts/diagnose_harvest.py --video data/RHOBH-TEST.mp4 --sample 100
+python scripts/validate_harvest.py data/harvest/RHOBH-TEST
+>>>>>>> origin/feat/identity-guard
 ```
 
 ## Verify Installation
@@ -54,8 +63,13 @@ The existing labeler app already handles imports correctly, so it works without 
 
 ```bash
 streamlit run app/labeler.py -- \
+<<<<<<< HEAD
     --harvest-dir data/harvest/RHOBH-TEST-v2 \
     --video data/RHOBH-TEST-v2.mp4
+=======
+    --harvest-dir data/harvest/RHOBH-TEST \
+    --video data/RHOBH-TEST.mp4
+>>>>>>> origin/feat/identity-guard
 ```
 
 ## Troubleshooting
@@ -143,7 +157,11 @@ chmod +x scripts/test_harvest_tools.sh
 
 # 2. Run diagnostics
 python scripts/diagnose_harvest.py \
+<<<<<<< HEAD
     --video data/RHOBH-TEST-v2.mp4 \
+=======
+    --video data/RHOBH-TEST.mp4 \
+>>>>>>> origin/feat/identity-guard
     --sample 100 \
     --output diagnostics/analysis
 

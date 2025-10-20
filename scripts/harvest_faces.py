@@ -7,12 +7,18 @@ import argparse
 import csv
 import json
 import logging
+<<<<<<< HEAD
 import os
 from collections import Counter
 import shutil
 from distutils.util import strtobool
 from pathlib import Path
 from typing import Optional
+=======
+from collections import Counter
+import shutil
+from pathlib import Path
+>>>>>>> origin/feat/identity-guard
 
 import cv2
 import numpy as np
@@ -30,6 +36,7 @@ from screentime.tracking.bytetrack_wrap import ByteTrackWrapper
 LOGGER = logging.getLogger("scripts.harvest")
 
 
+<<<<<<< HEAD
 def _normalize_threads(value: int) -> int:
     try:
         return max(1, int(value))
@@ -86,10 +93,13 @@ def build_session_options(thread_count: int):
     return session_options
 
 
+=======
+>>>>>>> origin/feat/identity-guard
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
+<<<<<<< HEAD
         "--harvest-dir",
         type=Path,
         default=None,
@@ -100,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=argparse.SUPPRESS,  # backward compatibility shim handled post-parse
+=======
+        "--output-dir",
+        type=Path,
+        default=Path("data/harvest"),
+        help="Directory to store harvested crops",
+>>>>>>> origin/feat/identity-guard
     )
     parser.add_argument(
         "--pipeline-config",
@@ -134,12 +150,15 @@ def parse_args() -> argparse.Namespace:
         help="Override face detection confidence threshold",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--det-thresh",
         type=float,
         default=None,
         help="Alias for --face-det-threshold (defaults to 0.30 when unset).",
     )
     parser.add_argument(
+=======
+>>>>>>> origin/feat/identity-guard
         "--person-conf",
         type=float,
         default=None,
@@ -175,7 +194,11 @@ def parse_args() -> argparse.Namespace:
         "--samples-per-track",
         type=int,
         default=None,
+<<<<<<< HEAD
         help="Override number of samples to keep per track (default 8)",
+=======
+        help="Override number of samples to keep per track",
+>>>>>>> origin/feat/identity-guard
     )
     parser.add_argument(
         "--min-gap-frames",
@@ -184,6 +207,7 @@ def parse_args() -> argparse.Namespace:
         help="Override temporal gap between selected samples",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--min-track-frames",
         type=int,
         default=None,
@@ -227,18 +251,23 @@ def parse_args() -> argparse.Namespace:
         help="Minimum IoU for stitching adjacency (default 0.1).",
     )
     parser.add_argument(
+=======
+>>>>>>> origin/feat/identity-guard
         "--min-frontalness",
         type=float,
         default=None,
         help="Override minimum frontalness required for selection eligibility",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--frontalness-thresh",
         type=float,
         default=None,
         help="Alias for --min-frontalness (defaults to 0.20 when unset).",
     )
     parser.add_argument(
+=======
+>>>>>>> origin/feat/identity-guard
         "--min-sharpness-pct",
         type=float,
         default=None,
@@ -259,6 +288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fast",
         action="store_true",
+<<<<<<< HEAD
         help="Enable fast mode (stride=2, 640 detector, threads=1, disable debug rejects).",
     )
     parser.add_argument(
@@ -266,6 +296,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override base frame stride before harvest sampling.",
+=======
+        help="Enable fast mode (stride=2, 640 detector, no debug rejects)",
+>>>>>>> origin/feat/identity-guard
     )
     parser.add_argument(
         "--onnx-providers",
@@ -275,6 +308,7 @@ def parse_args() -> argparse.Namespace:
         help="ONNX execution providers (e.g., 'CPUExecutionProvider' or 'CoreMLExecutionProvider CPUExecutionProvider')",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--defer-embeddings",
         action="store_true",
         help="Skip ArcFace embeddings during harvest (compute later in clustering/facebank stages).",
@@ -298,6 +332,8 @@ def parse_args() -> argparse.Namespace:
         help="Emit a heartbeat log at this interval in seconds (default: 2s).",
     )
     parser.add_argument(
+=======
+>>>>>>> origin/feat/identity-guard
         "--scene-aware",
         action="store_true",
         help="Use scene/shot detection and sample a few frames per scene.",
@@ -322,12 +358,15 @@ def parse_args() -> argparse.Namespace:
         help="Discard faces smaller than this fraction of the frame area.",
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--min-face",
         type=int,
         default=48,
         help="Minimum face bbox size in pixels for selection (shorter side, default 48).",
     )
     parser.add_argument(
+=======
+>>>>>>> origin/feat/identity-guard
         "--cluster-preview",
         action="store_true",
         help="Generate unsupervised identity clusters for harvested candidates (scene-aware mode only).",
@@ -344,6 +383,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Minimum samples per cluster for DBSCAN when running --cluster-preview.",
     )
+<<<<<<< HEAD
     parser.add_argument(
         "--write-candidates",
         action="store_true",
@@ -448,11 +488,16 @@ def migrate_nested_harvest(out_root: Path) -> None:
 
 
 
+=======
+    return parser.parse_args()
+
+>>>>>>> origin/feat/identity-guard
 
 def run_standard_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
 
+<<<<<<< HEAD
     if args.harvest_dir is not None:
         harvest_dir = Path(args.harvest_dir)
     elif args.output_dir is not None:
@@ -467,6 +512,11 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     det_thresh_arg = args.det_thresh if args.det_thresh is not None else args.face_det_threshold
     face_conf = float(det_thresh_arg) if det_thresh_arg is not None else 0.30
     person_conf = float(args.person_conf) if args.person_conf is not None else float(pipeline_cfg.get("person_conf_th", 0.20))
+=======
+    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(pipeline_cfg.get("det_size", [960, 960]))
+    face_conf = args.face_det_threshold or pipeline_cfg.get("face_conf_th", 0.45)
+    person_conf = args.person_conf or pipeline_cfg.get("person_conf_th", 0.20)
+>>>>>>> origin/feat/identity-guard
 
     if args.fast and args.retina_det_size is None:
         det_size = (640, 640)
@@ -475,6 +525,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         weights=args.person_weights,
         conf_thres=person_conf,
     )
+<<<<<<< HEAD
 
     providers = tuple(args.onnx_providers) if args.onnx_providers else None
     face_detector = RetinaFaceDetector(
@@ -484,6 +535,18 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         threads=int(args.threads),
         session_options=getattr(args, "session_options", None),
         user_det_size_override=getattr(args, "_retina_size_override", False),
+=======
+    
+    # Set ONNX providers for RetinaFace
+    providers = None
+    if args.onnx_providers:
+        providers = tuple(args.onnx_providers)
+    
+    face_detector = RetinaFaceDetector(
+        det_size=det_size, 
+        det_thresh=face_conf,
+        providers=providers
+>>>>>>> origin/feat/identity-guard
     )
     tracker = ByteTrackWrapper(**tracker_cfg)
 
@@ -497,8 +560,12 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
+<<<<<<< HEAD
     frontal_override = args.frontalness_thresh if args.frontalness_thresh is not None else args.min_frontalness
     min_frontalness = float(frontal_override) if frontal_override is not None else 0.20
+=======
+    min_frontalness = args.min_frontalness or float(pipeline_cfg.get("min_frontalness", 0.35))
+>>>>>>> origin/feat/identity-guard
     sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
     if sharpness_pctile is None:
         legacy_pct = pipeline_cfg.get("min_sharpness_pct")
@@ -510,12 +577,18 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     dilate_track_px = args.dilate_track_px or float(pipeline_cfg.get("dilate_track_px", 0.07))
     temporal_iou_tolerance = args.temporal_iou_tolerance or int(pipeline_cfg.get("temporal_iou_tolerance", 1))
     min_area_frac = float(pipeline_cfg.get("min_area_frac", 0.005))
+<<<<<<< HEAD
     if hasattr(args, "min_area_frac") and args.min_area_frac is not None:
         min_area_frac = float(args.min_area_frac)
+=======
+    if hasattr(args, "min_area_frac") and args.min_area_frac is not None:  # future-proof
+        min_area_frac = args.min_area_frac
+>>>>>>> origin/feat/identity-guard
     frontal_pctile = pipeline_cfg.get("frontal_pctile")
     if frontal_pctile is not None:
         frontal_pctile = float(frontal_pctile)
     min_frontal_picks = int(pipeline_cfg.get("min_frontal_picks", 2))
+<<<<<<< HEAD
     min_face_px = int(max(0, args.min_face))
     progress_fallback_frames = max(1, int(pipeline_cfg.get("progress_fallback_frames", 500)))
     min_track_frames_value = args.min_track_frames
@@ -550,6 +623,8 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
     identity_sim_threshold = float(pipeline_cfg.get("identity_sim_threshold", 0.55))
     identity_min_picks = int(pipeline_cfg.get("identity_min_picks", 3))
+=======
+>>>>>>> origin/feat/identity-guard
 
     harvest_config = HarvestConfig(
         stride=pipeline_cfg.get("stride", 1),
@@ -559,7 +634,10 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         min_gap_frames=min_gap_frames,
         min_area_frac=min_area_frac,
         min_area_px=pipeline_cfg.get("min_area_px"),
+<<<<<<< HEAD
         min_face_px=min_face_px,
+=======
+>>>>>>> origin/feat/identity-guard
         min_sharpness_laplacian=min_sharpness,
         min_sharpness_pct=min_sharpness_pct,
         sharpness_pctile=sharpness_pctile,
@@ -577,6 +655,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         multi_face_per_track_guard=pipeline_cfg.get("multi_face_per_track_guard", True),
         multi_face_tiebreak=pipeline_cfg.get("multi_face_tiebreak", "quality"),
         fallback_head_pct=float(pipeline_cfg.get("fallback_head_pct", 0.4)),
+<<<<<<< HEAD
         identity_guard=identity_guard_enabled,
         identity_split=identity_split_enabled,
         identity_sim_threshold=identity_sim_threshold,
@@ -616,6 +695,27 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     manifest_path = runner.run(args.video, harvest_dir)
     LOGGER.info("Harvest manifest written to %s", manifest_path)
 
+=======
+        identity_guard=bool(pipeline_cfg.get("identity_guard", True)),
+        identity_split=bool(pipeline_cfg.get("identity_split", True)),
+        identity_sim_threshold=float(pipeline_cfg.get("identity_sim_threshold", 0.62)),
+        identity_min_picks=int(pipeline_cfg.get("identity_min_picks", 3)),
+        reindex_harvest_tracks=bool(pipeline_cfg.get("reindex_harvest_tracks", True)),
+        fast_mode=args.fast,
+    )
+
+    if args.fast:
+        harvest_config.stride = max(2, harvest_config.stride)
+        harvest_config.debug_rejections = False
+
+
+    runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
+    ensure_dir(args.output_dir)
+    manifest_path = runner.run(args.video, args.output_dir)
+    LOGGER.info("Harvest manifest written to %s", manifest_path)
+
+
+>>>>>>> origin/feat/identity-guard
 def run_scene_aware_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(pipeline_cfg.get("det_size", [960, 960]))
@@ -625,6 +725,7 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         det_size = (640, 640)
 
     providers = tuple(args.onnx_providers) if args.onnx_providers else None
+<<<<<<< HEAD
     face_detector = RetinaFaceDetector(
         det_size=det_size,
         det_thresh=face_conf,
@@ -641,6 +742,9 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
     else:
         out_dir = ensure_dir(Path("data/harvest") / infer_video_stem(args.video))
     migrate_nested_harvest(out_dir)
+=======
+    face_detector = RetinaFaceDetector(det_size=det_size, det_thresh=face_conf, providers=providers)
+>>>>>>> origin/feat/identity-guard
 
     cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
@@ -669,6 +773,13 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                     "Scene detection found no segments and video length is unavailable; no probes will be sampled."
                 )
 
+<<<<<<< HEAD
+=======
+        out_root = ensure_dir(args.output_dir)
+        video_stem = infer_video_stem(args.video)
+        out_dir = ensure_dir(out_root / video_stem)
+
+>>>>>>> origin/feat/identity-guard
         scenes_csv = out_dir / "scenes.csv"
         with scenes_csv.open("w", encoding="utf-8") as fh:
             fh.write("scene_idx,start_frame,end_frame\n")
@@ -806,7 +917,10 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                 eps=max(1e-6, float(args.cluster_eps)),
                 min_samples=max(1, int(args.cluster_min_samples)),
                 provider_overrides=args.onnx_providers,
+<<<<<<< HEAD
                 threads=int(args.threads),
+=======
+>>>>>>> origin/feat/identity-guard
             )
         elif args.cluster_preview:
             LOGGER.warning("Cluster preview requested but no candidate crops were written; skipping clustering.")
@@ -820,7 +934,10 @@ def run_cluster_preview(
     eps: float,
     min_samples: int,
     provider_overrides: Optional[list[str]],
+<<<<<<< HEAD
     threads: int,
+=======
+>>>>>>> origin/feat/identity-guard
 ) -> None:
     """Embed harvested candidates and cluster by cosine similarity for quick review."""
     LOGGER.info("Running cluster preview on %d candidate crops.", len(preview_records))
@@ -833,7 +950,11 @@ def run_cluster_preview(
             providers.append("CPUExecutionProvider")
         provider_list = tuple(providers)
 
+<<<<<<< HEAD
     embedder = ArcFaceEmbedder(providers=provider_list, threads=threads)
+=======
+    embedder = ArcFaceEmbedder(providers=provider_list)
+>>>>>>> origin/feat/identity-guard
     embeddings: list[np.ndarray] = []
     kept_records: list[dict[str, object]] = []
 
@@ -1013,6 +1134,7 @@ def run_cluster_preview(
 
 def main() -> None:
     args = parse_args()
+<<<<<<< HEAD
     threads_explicit = args.threads is not None
     args.threads = _normalize_threads(args.threads or 1)
     args.progress_interval = max(0.1, float(args.progress_interval))
@@ -1029,6 +1151,8 @@ def main() -> None:
 
     configure_threads(args.threads)
     args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
+=======
+>>>>>>> origin/feat/identity-guard
     setup_logging()
 
     if args.scene_aware:

@@ -1,5 +1,5 @@
 ## 1 Overview and Goals
-The **Screen Time Analyzer** is a system designed to measure the on‑screen presence of cast members in episodic video content (e.g. reality TV shows).  Its goals are:
+The **Screen Time Analyzer** is a system designed to measure the on‑screen presence of cast members in episodic video content (e.g. reality TV shows). Its goals are:
 
 - **High accuracy and efficiency** – identify and measure every instance a cast member appears on screen, even if their face is partially occluded or turned away.  Accuracy should exceed 95% and manual effort should be minimal.
 - **Scalable pipeline** – handle large video files, process each episode end‑to‑end and accumulate cast member appearances across multiple episodes and seasons.

@@ -6,6 +6,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+<<<<<<< HEAD
+=======
+import platform
+>>>>>>> origin/feat/identity-guard
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
@@ -27,6 +31,7 @@ from screentime.types import TrackState, bbox_area, iou
 LOGGER = logging.getLogger("scripts.run_tracker")
 LOWCONF_DEBUG_LABELS = {"LVP", "BRANDI", "RINNA", "EILEEN"}
 PER_LABEL_SIMILARITY_TH_OVERRIDES = {
+<<<<<<< HEAD
     # Lowered thresholds ensure these identities still accumulate votes when
     # running on CPU-only embeddings (FaceAnalysis fallback).
     "LVP": 0.25,
@@ -34,6 +39,10 @@ PER_LABEL_SIMILARITY_TH_OVERRIDES = {
     "EILEEN": 0.64,
     "KIM": 0.56,
     "BRANDI": 0.55,
+=======
+    "LVP": 0.60,
+    "EILEEN": 0.64,
+>>>>>>> origin/feat/identity-guard
 }
 DEFAULT_MIN_MARGIN = 0.0
 
@@ -374,12 +383,16 @@ def main() -> None:
                 if frame_idx - state.last_embed_frame < embed_every_n:
                     should_embed = False
             if should_embed:
+<<<<<<< HEAD
                 aligned = face_detector.align_to_112(
                     frame,
                     face.landmarks,
                     face.bbox,
                     force_bbox=getattr(face_detector, "force_bbox_alignment", False),
                 )
+=======
+                aligned = face_detector.align_to_112(frame, face.landmarks, face.bbox)
+>>>>>>> origin/feat/identity-guard
                 embedding = embedder.embed(aligned)
                 match = matcher.best_match(embedding)
                 if match is not None:
@@ -710,6 +723,13 @@ def _configure_runtime_threads() -> None:
 
 
 def _default_providers_for_platform() -> Tuple[str, ...]:
+<<<<<<< HEAD
+=======
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin" and machine in {"arm64", "aarch64"}:
+        return ("CoreMLExecutionProvider", "CPUExecutionProvider")
+>>>>>>> origin/feat/identity-guard
     return ("CPUExecutionProvider",)
 
 

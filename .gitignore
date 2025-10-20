@@ -18,3 +18,5 @@ data/facebank/
 # large analytics artifacts (only under data/)
 data/**/*.parquet
 data/**/*.csv
+.thumbnails/
+tracker.log
