@@ -23,29 +23,6 @@ class TrackAssignment:
     sources: List[str]
     destinations: List[str]
 
-<<<<<<< HEAD
-def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
-    """Load clusters.json if present; returns {cluster_id: [track_ids]} mapping."""
-    cluster_path = harvest_dir / "clusters.json"
-    if not cluster_path.exists():
-        return {}
-    try:
-        with cluster_path.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse {cluster_path}: {exc}") from exc
-    clusters: Dict[int, List[int]] = {}
-    for entry in payload.get("clusters", []):
-        cid = int(entry.get("id", -1))
-        tracks = [int(t) for t in entry.get("tracks", [])]
-        if cid < 0 or not tracks:
-            continue
-        clusters[cid] = sorted(tracks)
-    return clusters
-
-
-=======
->>>>>>> origin/feat/identity-guard
 
 def list_harvest_stems(harvest_root: Path) -> List[str]:
     """Return sorted harvest directory names under the given root."""
@@ -72,35 +49,6 @@ def load_manifest(harvest_dir: Path) -> pd.DataFrame:
     return df
 
 
-<<<<<<< HEAD
-def load_progress(harvest_dir: Path) -> Optional[Dict[str, object]]:
-    """Load progress.json for a harvest if present."""
-    progress_path = harvest_dir / "progress.json"
-    if not progress_path.exists():
-        return None
-    try:
-        with progress_path.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
-    result: Dict[str, object] = {}
-    frames_total = payload.get("frames_total", 0)
-    frames_done = payload.get("frames_done", 0)
-    percent = payload.get("percent")
-    tracks = payload.get("tracks", 0)
-    result["frames_total"] = int(frames_total or 0)
-    result["frames_done"] = int(frames_done or 0)
-    try:
-        result["percent"] = float(percent) if percent is not None else None
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        result["percent"] = None
-    result["tracks"] = int(tracks or 0)
-    result["raw"] = payload
-    return result
-
-
-=======
->>>>>>> origin/feat/identity-guard
 def _infer_track_id(track_dir: Path) -> int:
     try:
         return int(track_dir.name.split("_", 1)[-1])
@@ -155,48 +103,6 @@ def _frame_from_name(stem: str) -> Optional[int]:
     return None
 
 
-<<<<<<< HEAD
-def _resolve_sample_path(original_path: Path, row: pd.Series, harvest_dir: Path) -> Path:
-    """Return a path that exists on disk, falling back to candidate/debug crops."""
-    if original_path.is_absolute() and original_path.exists():
-        return original_path
-
-    direct_candidate = harvest_dir / original_path
-    if not original_path.is_absolute() and direct_candidate.exists():
-        return direct_candidate.resolve()
-
-    # Handle legacy prefixes like data/harvest/<stem>/... by trimming to the track segment.
-    for idx, part in enumerate(original_path.parts):
-        if part.startswith("track_"):
-            trimmed = Path(*original_path.parts[idx:])
-            candidate = harvest_dir / trimmed
-            if candidate.exists():
-                return candidate.resolve()
-            break
-
-    track_id = _safe_int(row.get("track_id"))
-    frame_idx = _safe_int(row.get("frame"))
-    suffix = original_path.suffix if original_path.suffix else ".jpg"
-
-    if track_id is not None and frame_idx is not None:
-        candidates_dir = harvest_dir / "candidates" / f"track_{track_id:04d}"
-        candidate_path = candidates_dir / f"F{frame_idx:06d}{suffix}"
-        if candidate_path.exists():
-            return candidate_path
-        if suffix.lower() != ".jpg":
-            alt_candidate = candidates_dir / f"F{frame_idx:06d}.jpg"
-            if alt_candidate.exists():
-                return alt_candidate
-
-        debug_path = harvest_dir / f"track_{track_id:04d}" / "debug" / original_path.name
-        if debug_path.exists():
-            return debug_path
-
-    return direct_candidate if direct_candidate.exists() else original_path
-
-
-=======
->>>>>>> origin/feat/identity-guard
 def load_samples(harvest_dir: Path) -> pd.DataFrame:
     """Load selected samples, falling back to scanning directories if CSV missing."""
     csv_path = harvest_dir / "selected_samples.csv"
@@ -252,14 +158,6 @@ def load_samples(harvest_dir: Path) -> pd.DataFrame:
         samples_df["byte_track_id"] = samples_df["track_id"]
     if "frame" not in samples_df.columns:
         samples_df["frame"] = samples_df["path"].map(lambda p: _frame_from_name(Path(p).stem))
-<<<<<<< HEAD
-    if not samples_df.empty:
-        samples_df["path"] = samples_df.apply(
-            lambda row: str(_resolve_sample_path(Path(str(row.get("path", ""))), row, harvest_dir)),
-            axis=1,
-        )
-=======
->>>>>>> origin/feat/identity-guard
     return samples_df
 
 

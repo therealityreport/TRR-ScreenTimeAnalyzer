@@ -89,14 +89,6 @@ def load_assignments_cached(log_path: str):
 
 @st.cache_data(show_spinner=False)
 def list_person_labels(facebank_dir: str) -> List[str]:
-<<<<<<< HEAD
-@st.cache_data(show_spinner=False)
-def load_clusters_cached(harvest_path: str):
-    return data_lib.load_clusters(Path(harvest_path))
-
-
-=======
->>>>>>> origin/feat/identity-guard
     root = Path(facebank_dir)
     if not root.exists():
         return []
@@ -356,13 +348,6 @@ def render_assignment_panel(
     facebank_labels: List[str],
     harvest_dir: Path,
     video_path: Optional[Path],
-<<<<<<< HEAD
-    samples_df: pd.DataFrame,
-    summary_index: pd.DataFrame,
-    cluster_id: Optional[int],
-    cluster_tracks: Sequence[int],
-=======
->>>>>>> origin/feat/identity-guard
 ) -> None:
     track_id = int(track_row["track_id"])
     byte_track_id = int(track_row["byte_track_id"])
@@ -371,14 +356,6 @@ def render_assignment_panel(
 
     status = data_lib.assignment_status(track_row)
     st.markdown(format_badge(status, data_lib.status_badge_color(status)), unsafe_allow_html=True)
-<<<<<<< HEAD
-    cluster_track_list = sorted({int(t) for t in cluster_tracks}) if cluster_tracks else []
-    if cluster_id is not None and cluster_track_list:
-        track_list_str = ", ".join(f"{tid:04d}" for tid in cluster_track_list)
-        st.info(f"Cluster {cluster_id:03d} → {len(cluster_track_list)} track(s): {track_list_str}")
-
-=======
->>>>>>> origin/feat/identity-guard
 
     meta_cols = st.columns(4)
     with meta_cols[0]:
@@ -434,15 +411,6 @@ def render_assignment_panel(
         disabled=target_label is None or track_samples.empty,
         key=f"assign_all_btn_{track_id}",
     )
-<<<<<<< HEAD
-    cluster_assign_requested = False
-    if cluster_track_list and target_label is not None:
-        cluster_assign_requested = st.button(
-            f"Assign cluster ({len(cluster_track_list)} tracks)",
-            key=f"assign_cluster_btn_{track_id}",
-        )
-=======
->>>>>>> origin/feat/identity-guard
 
     representative_sample: Optional[Path] = None
     if selected_paths:
@@ -490,37 +458,7 @@ def render_assignment_panel(
     elif assign_selected_requested and target_label is not None:
         paths_to_assign = list(selected_paths)
 
-<<<<<<< HEAD
-    assignment_jobs: List[Tuple[int, int, List[Path]]] = []
     if paths_to_assign and target_label is not None:
-        assignment_jobs.append((track_id, byte_track_id, [Path(p) for p in paths_to_assign]))
-    if cluster_assign_requested and target_label is not None:
-        for cluster_track in cluster_track_list:
-            try:
-                summary_row = summary_index.loc[cluster_track]
-            except KeyError:
-                continue
-            cluster_rows = samples_df[samples_df["track_id"] == cluster_track]
-            if "picked" in cluster_rows.columns:
-                cluster_rows = cluster_rows[cluster_rows["picked"].astype(str).str.lower().isin({"1", "true", "yes"})]
-            if "is_debug" in cluster_rows.columns:
-                cluster_rows = cluster_rows[cluster_rows["is_debug"] != True]
-            cluster_paths: List[Path] = []
-            for raw_path in cluster_rows.get("path", []):
-                candidate = Path(str(raw_path))
-                if not candidate.is_absolute():
-                    candidate = (harvest_dir / candidate).resolve()
-                if candidate.exists():
-                    cluster_paths.append(candidate)
-            if not cluster_paths:
-                continue
-            cluster_byte = int(summary_row.get("byte_track_id") or cluster_track)
-            assignment_jobs.append((cluster_track, cluster_byte, cluster_paths))
-
-    if assignment_jobs and target_label is not None:
-=======
-    if paths_to_assign and target_label is not None:
->>>>>>> origin/feat/identity-guard
         try:
             normalized_label = assign_lib.normalize_label(target_label or "")
         except ValueError as exc:
@@ -531,23 +469,6 @@ def render_assignment_panel(
             for details in index.values():
                 existing_sources.update(details.sources)
 
-<<<<<<< HEAD
-            total_copied = 0
-            for job_track_id, job_byte_id, job_paths in assignment_jobs:
-                result = assign_lib.assign_samples(
-                    job_paths,
-                    stem=stem,
-                    harvest_id=job_track_id,
-                    byte_track_id=job_byte_id,
-                    person_label=normalized_label,
-                    facebank_dir=facebank_dir,
-                    assignments_log=assignments_log,
-                    existing_sources=existing_sources,
-                )
-                total_copied += len(result.copied)
-            if total_copied:
-                st.success(f"Copied {total_copied} file(s) to {normalized_label}")
-=======
             result = assign_lib.assign_samples(
                 [Path(p) for p in paths_to_assign],
                 stem=stem,
@@ -560,7 +481,6 @@ def render_assignment_panel(
             )
             if result.copied:
                 st.success(f"Copied {len(result.copied)} file(s) to {normalized_label}")
->>>>>>> origin/feat/identity-guard
                 load_assignments_cached.clear()
                 list_person_labels.clear()
                 st.rerun()
@@ -653,32 +573,18 @@ def main() -> None:
         harvest_dir = CLI_ARGS.harvest_dir
 
     st.sidebar.caption(f"Video: {CLI_ARGS.video if CLI_ARGS.video else 'not supplied'}")
-<<<<<<< HEAD
-    if CLI_ARGS.video is None:
-        st.warning("Video path not supplied; overlay and attribution tools will be limited.")
-
-=======
->>>>>>> origin/feat/identity-guard
     include_debug = st.sidebar.toggle("Include debug rejects", value=False)
     min_samples = st.sidebar.slider("Min picked samples", 0, 20, 0)
     min_frames = st.sidebar.slider("Min track frames", 0, 300, 0, step=5)
     quality_percentile = st.sidebar.slider("Quality percentile", 0, 100, 0)
     search_term = st.sidebar.text_input("Search track / byte id")
     manifest_df = load_manifest_cached(str(harvest_dir))
-<<<<<<< HEAD
-    clusters = load_clusters_cached(str(harvest_dir))
-    track_to_cluster = {track: cid for cid, tracks in clusters.items() for track in tracks}
-    if track_to_cluster:
-        samples_df = samples_df.copy()
-        samples_df["cluster_id"] = samples_df["track_id"].map(track_to_cluster)
-=======
     samples_df = load_samples_cached(str(harvest_dir))
     if samples_df.empty:
         st.warning("No samples available for this harvest.")
         return
     if not include_debug:
         samples_df = samples_df[samples_df["is_debug"] != True]  # noqa: E712
->>>>>>> origin/feat/identity-guard
 
     assignments, assignment_index = load_assignments_cached(str(ASSIGNMENTS_LOG))
     summary_df = data_lib.summarize_tracks(selected_stem, manifest_df, samples_df, assignment_index)
@@ -686,11 +592,6 @@ def main() -> None:
         st.warning("No track summaries available.")
         return
 
-<<<<<<< HEAD
-    summary_index = summary_df.set_index("track_id", drop=False)
-
-=======
->>>>>>> origin/feat/identity-guard
     if quality_percentile > 0:
         threshold = data_lib.percentile_threshold(samples_df["quality"], quality_percentile)
     else:
@@ -705,48 +606,6 @@ def main() -> None:
         status=filtered.apply(data_lib.assignment_status, axis=1),
         status_rank=lambda df: df["status"].map({"Unassigned": 0, "Partially Assigned": 1, "Assigned": 2}),
     )
-<<<<<<< HEAD
-    if track_to_cluster:
-        filtered = filtered.assign(cluster_id=filtered["track_id"].map(track_to_cluster))
-    else:
-        filtered = filtered.assign(cluster_id=pd.NA)
-    sort_cols = ["status_rank", "picked_count", "max_quality"]
-    sort_orders = [True, False, False]
-    if track_to_cluster:
-        filtered = filtered.sort_values(
-            ["cluster_id"] + sort_cols + ["track_id"],
-            ascending=[True] + sort_orders + [True],
-        )
-    else:
-        filtered = filtered.sort_values(
-            sort_cols + ["track_id"],
-            ascending=sort_orders + [True],
-        )
-
-    selected_cluster: Optional[int] = None
-    if track_to_cluster:
-        cluster_options = [None] + sorted(clusters.keys())
-        cluster_labels = {None: "All clusters"}
-        for cid in sorted(clusters.keys()):
-            cluster_labels[cid] = f"Cluster {cid:03d} ({len(clusters[cid])} tracks)"
-        selected_cluster = st.sidebar.selectbox(
-            "Cluster filter",
-            options=cluster_options,
-            format_func=lambda cid: cluster_labels[cid],
-            key="cluster_filter",
-        )
-        if selected_cluster is not None:
-            filtered = filtered[filtered["cluster_id"] == selected_cluster]
-            if filtered.empty:
-                st.info("No tracks remain after applying the cluster filter.")
-                return
-
-    filtered = filtered.reset_index(drop=True)
-    track_ids = filtered["track_id"].astype(int).tolist()
-
-    if not track_ids:
-        st.info("No tracks match the current filters.")
-=======
     filtered = filtered.sort_values(
         ["status_rank", "picked_count", "max_quality"],
         ascending=[True, False, False],
@@ -766,7 +625,6 @@ def main() -> None:
 
     if not track_ids:
         st.info("No scene-aware clusters available. Run harvest with --cluster-preview or adjust filters.")
->>>>>>> origin/feat/identity-guard
         return
 
     active_track = ensure_active_track(track_ids)
@@ -774,36 +632,19 @@ def main() -> None:
         active_track = track_ids[0]
         st.session_state["active_track_id"] = active_track
 
-<<<<<<< HEAD
-    if track_to_cluster:
-        if selected_cluster is not None:
-            st.sidebar.caption(f"Cluster {selected_cluster:03d} • {len(track_ids)} tracks")
-        else:
-            st.sidebar.caption(f"{len(clusters)} clusters • {len(track_ids)} tracks")
-    else:
-        st.sidebar.caption(f"{len(track_ids)} tracks available")
-=======
     st.sidebar.caption(f"{len(track_ids)} clusters ready to review")
->>>>>>> origin/feat/identity-guard
 
     track_samples = data_lib.samples_for_track(samples_df, active_track, include_debug=include_debug)
     if track_samples.empty:
         st.warning("No samples for selected track.")
         return
     active_index = track_ids.index(active_track)
-<<<<<<< HEAD
-    active_cluster_id = track_to_cluster.get(active_track) if track_to_cluster else None
-    cluster_label = None
-    if active_cluster_id is not None:
-        cluster_label = f"Cluster {active_cluster_id:04d}"
-=======
     cluster_label = None
     if "cluster_id" in track_samples.columns:
         unique_clusters = track_samples["cluster_id"].dropna().unique().tolist()
         if unique_clusters:
             cid = int(unique_clusters[0])
             cluster_label = f"Cluster {cid:04d}" if cid >= 0 else "Noise Cluster"
->>>>>>> origin/feat/identity-guard
 
     cluster_title = cluster_label or f"Track {active_track:04d}"
 
@@ -864,13 +705,6 @@ def main() -> None:
             facebank_labels,
             harvest_dir,
             CLI_ARGS.video,
-<<<<<<< HEAD
-            samples_df,
-            summary_index,
-            active_cluster_id,
-            clusters.get(active_cluster_id, []) if active_cluster_id is not None else [],
-=======
->>>>>>> origin/feat/identity-guard
         )
 
     shortcut = current_shortcut()

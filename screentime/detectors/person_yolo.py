@@ -32,43 +32,14 @@ class YOLOPersonDetector:
             ) from exc
 
         self.model = YOLO(weights)
-<<<<<<< HEAD
-        resolved_device = device
-        if resolved_device is None:
-            try:
-                import torch  # type: ignore
-
-                if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    resolved_device = "mps"
-                elif torch.cuda.is_available():
-                    resolved_device = "cuda"
-            except Exception:  # pragma: no cover - optional dependency
-                resolved_device = None
-        if resolved_device is not None:
-            try:
-                self.model.to(resolved_device)
-            except Exception as exc:  # pragma: no cover - defensive
-                LOGGER.warning(
-                    "YOLO person detector could not use device=%s (%s); falling back to auto.",
-                    resolved_device,
-                    exc,
-                )
-                resolved_device = None
-        self.device = resolved_device or "auto"
-=======
         if device:
             self.model.to(device)
->>>>>>> origin/feat/identity-guard
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         LOGGER.info(
             "Loaded YOLO person detector weights=%s device=%s conf=%.2f",
             weights,
-<<<<<<< HEAD
-            self.device,
-=======
             device or "auto",
->>>>>>> origin/feat/identity-guard
             conf_thres,
         )
 

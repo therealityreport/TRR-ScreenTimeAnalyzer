@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import logging
-<<<<<<< HEAD
-=======
 import os
->>>>>>> origin/feat/identity-guard
 import platform
 from typing import List, Optional, Tuple
 
@@ -15,36 +12,16 @@ import numpy as np
 
 from screentime.types import BBox, Detection
 
-<<<<<<< HEAD
-try:  # pragma: no cover - optional dependency import guard
-    import onnxruntime as ort  # type: ignore
-except Exception:  # pragma: no cover
-    ort = None
-
-=======
->>>>>>> origin/feat/identity-guard
 LOGGER = logging.getLogger("screentime.detectors.face")
 
 
 def _default_providers() -> Tuple[str, ...]:
     """Choose default ONNX providers for RetinaFace."""
-<<<<<<< HEAD
-    if ort is None:
-        return ("CPUExecutionProvider",)
-    available = {provider for provider in ort.get_available_providers()}
-    providers: List[str] = []
-    if "CoreMLExecutionProvider" in available and platform.machine().lower() == "arm64":
-        providers.append("CoreMLExecutionProvider")
-    if "CPUExecutionProvider" in available:
-        providers.append("CPUExecutionProvider")
-    return tuple(providers) if providers else ("CPUExecutionProvider",)
-=======
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin" and machine in {"arm64", "aarch64"}:
         return ("CoreMLExecutionProvider", "CPUExecutionProvider")
     return ("CPUExecutionProvider",)
->>>>>>> origin/feat/identity-guard
 
 
 class RetinaFaceDetector:
@@ -55,17 +32,10 @@ class RetinaFaceDetector:
         providers: Optional[Tuple[str, ...]] = None,
         det_size: Tuple[int, int] = (960, 960),
         det_thresh: float = 0.45,
-<<<<<<< HEAD
-        threads: int = 1,
-        session_options=None,
-        user_det_size_override: bool = False,
-    ) -> None:
-=======
     ) -> None:
         os.environ.setdefault("OMP_NUM_THREADS", "2")
         os.environ.setdefault("MKL_NUM_THREADS", "2")
         os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "2")
->>>>>>> origin/feat/identity-guard
         try:
             from insightface.app import FaceAnalysis
         except ImportError as exc:  # pragma: no cover - import guard
@@ -74,55 +44,15 @@ class RetinaFaceDetector:
                 "Install it via `pip install insightface`."
             ) from exc
 
-<<<<<<< HEAD
-=======
         self.det_size = det_size
         self.det_thresh = det_thresh
->>>>>>> origin/feat/identity-guard
         provider_list: Tuple[str, ...]
         if providers is None:
             provider_list = _default_providers()
         else:
             provider_list = tuple(providers)
-<<<<<<< HEAD
-            if "CPUExecutionProvider" not in provider_list:
-                provider_list = tuple(list(provider_list) + ["CPUExecutionProvider"])
-
-        session_opts = session_options
-        if session_opts is None and ort is not None:
-            try:
-                session_opts = ort.SessionOptions()
-                session_opts.intra_op_num_threads = max(1, int(threads))
-                session_opts.inter_op_num_threads = 1
-            except Exception:  # pragma: no cover - optional
-                session_opts = None
-
-        det_size_tuple = tuple(int(v) for v in det_size)
-        if (
-            not user_det_size_override
-            and "CoreMLExecutionProvider" in provider_list
-            and det_size_tuple == (960, 960)
-        ):
-            det_size_tuple = (640, 640)
-            LOGGER.info("RetinaFace defaulted det_size to %s for CoreML provider", det_size_tuple)
-
-        self.det_size = det_size_tuple
-        self.det_thresh = det_thresh
-        self.providers = provider_list
-        # CoreML-backed inference yields stable five-point landmarks. On CPU-only
-        # runs the landmarks can wobble enough to hurt recognition, so we fall back
-        # to simple bbox crops when no accelerated provider is available.
-        self.force_bbox_alignment = not any(p != "CPUExecutionProvider" for p in self.providers)
-        self.app = FaceAnalysis(
-            name="buffalo_l",
-            allowed_modules=["detection"],
-            providers=list(provider_list),
-            sess_options=session_opts,
-        )
-=======
         self.providers = provider_list
         self.app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=list(provider_list))
->>>>>>> origin/feat/identity-guard
         ctx_id = 0  # auto GPU/CoreML if available
         self.app.prepare(ctx_id=ctx_id, det_size=self.det_size)
         backend = None
@@ -134,11 +64,7 @@ class RetinaFaceDetector:
             backend = None
         LOGGER.info(
             "Loaded RetinaFace detector det_size=%s det_thresh=%.2f providers=%s backend=%s",
-<<<<<<< HEAD
-            self.det_size,
-=======
             det_size,
->>>>>>> origin/feat/identity-guard
             det_thresh,
             provider_list,
             backend,
@@ -162,26 +88,6 @@ class RetinaFaceDetector:
                     class_id=0,
                     landmarks=landmarks,
                 )
-<<<<<<< HEAD
-        )
-        return detections
-
-    @staticmethod
-    def align_to_112(
-        image: np.ndarray,
-        landmarks: Optional[np.ndarray],
-        bbox: BBox,
-        force_bbox: bool = False,
-    ) -> np.ndarray:
-        """Align face to 112x112 using landmarks if available, else simple crop+resize."""
-        target_size = (112, 112)
-        if (
-            force_bbox
-            or landmarks is None
-            or not isinstance(landmarks, np.ndarray)
-            or landmarks.shape != (5, 2)
-        ):
-=======
             )
         return detections
 
@@ -190,7 +96,6 @@ class RetinaFaceDetector:
         """Align face to 112x112 using landmarks if available, else simple crop+resize."""
         target_size = (112, 112)
         if landmarks is None or landmarks.shape != (5, 2):
->>>>>>> origin/feat/identity-guard
             x1, y1, x2, y2 = [int(round(v)) for v in bbox]
             crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
             if crop.size == 0:
@@ -217,14 +122,4 @@ class RetinaFaceDetector:
             return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
 
         aligned = cv2.warpAffine(image, trans, target_size, borderValue=0.0)
-<<<<<<< HEAD
-        # Degenerate transforms can yield mostly-empty output; fall back if we hit that.
-        if aligned.size == 0 or float(np.count_nonzero(aligned)) / float(aligned.size) < 0.05:
-            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-            crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-            if crop.size == 0:
-                crop = image
-            return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
-=======
->>>>>>> origin/feat/identity-guard
         return aligned
