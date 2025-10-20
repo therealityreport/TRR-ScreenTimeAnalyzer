@@ -1,0 +1,21 @@
+{
+  "labels": [
+    "BRANDI",
+    "EILEEN",
+    "KIM",
+    "KYLE",
+    "LVP",
+    "RINNA",
+    "YOLANDA"
+  ],
+  "counts": {
+    "BRANDI": 10,
+    "EILEEN": 14,
+    "KIM": 48,
+    "KYLE": 16,
+    "LVP": 8,
+    "RINNA": 29,
+    "YOLANDA": 11
+  },
+  "num_labels": 7
+}

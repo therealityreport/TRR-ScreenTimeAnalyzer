@@ -1,0 +1,16 @@
+stride: 1
+face_in_track_iou: 0.20
+temporal_iou_tolerance: 1
+face_conf_th: 0.35
+min_area_frac: 0.003
+identity_guard_stride: 6
+identity_guard_consecutive: 3
+identity_guard_cosine_reject: 0.35
+identity_sim_threshold: 0.55
+stitch_identities: true
+stitch_sim: 0.45
+stitch_gap_ms: 8000.0
+stitch_min_iou: 0.1
+new_track_min_frames: 3
+max_new_tracks_per_sec: 2.0
+min_track_frames: 12

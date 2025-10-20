@@ -1,16 +1,20 @@
-# Python
-__pycache__/
-*.pyc
+# virtual envs and caches
+.codex-venv/
 .venv/
-.env
+__pycache__/
+.thumbnails/
+tmp/
+diagnostics/
 
-# Data artifacts
-data/
-!data/.gitkeep
+# run outputs and large data
+data/harvest/
+data/outputs/
+data/facebank/
 
-# Models
-models/weights/*
+# media
+*.mp4
+*.mov
 
-# OS/editor
-.DS_Store
-.vscode/
+# large analytics artifacts (only under data/)
+data/**/*.parquet
+data/**/*.csv

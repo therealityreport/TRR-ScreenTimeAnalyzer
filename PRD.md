@@ -27,7 +27,7 @@ The end‑to‑end process comprises several stages.  Each stage corresponds to 
    - **Improving the facebank**: When new faces are discovered or assignments are incorrect, the user can move crops into the appropriate person folder and rebuild the facebank.
 
 4. **Harvest & Ground Truth Assignment**
-   - **Harvest script (`harvest_faces.py`)**: Runs detection and tracking on an episode and saves face crops to `data/harvest/<episode>/tracks`.  It also generates `manifest.json` summarizing the tracks, frame ranges, average area and average confidence.
+   - **Harvest script (`harvest_faces.py`)**: Runs detection and tracking on an episode and saves face crops to `data/harvest/<episode>/track_XXXX`.  It also generates `manifest.json` summarizing the tracks, frame ranges, average area and average confidence.
    - **Manual assignment (optional)**: The manifest helps identify unassigned tracks.  Users can review sample frames and assign the track to a cast member by moving the crops into the correct folder in the facebank.  After manual assignment, rebuild the facebank.
 
 5. **Attribution & Summarization**
