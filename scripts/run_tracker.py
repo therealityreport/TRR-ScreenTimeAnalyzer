@@ -29,17 +29,22 @@ from screentime.types import TrackState, bbox_area, iou
 LOGGER = logging.getLogger("scripts.run_tracker")
 LOWCONF_DEBUG_LABELS = {"LVP", "BRANDI", "RINNA", "EILEEN"}
 PER_LABEL_SIMILARITY_TH_OVERRIDES = {
-    # Lowered thresholds ensure these identities still accumulate votes when
-    # running on CPU-only embeddings (FaceAnalysis fallback).
-    "LVP": 0.25,
-    "RINNA": 0.72,
-    "EILEEN": 0.64,
-    "KIM": 0.56,
-    "BRANDI": 0.55,
+    # OPTIMIZED: Dramatically lowered thresholds for CPU embeddings (FaceAnalysis fallback)
+    # to ensure all identities accumulate votes properly
+    "LVP": 0.20,        # Lower from 0.25
+    "RINNA": 0.35,      # Lower from 0.72
+    "EILEEN": 0.30,     # Lower from 0.64
+    "KIM": 0.35,        # Lower from 0.56
+    "BRANDI": 0.25,     # Lower from 0.55 - CRITICAL FIX
+    "KYLE": 0.30,       # Added - was missing
+    "YOLANDA": 0.30,    # Added - was missing
 }
 PER_LABEL_SIMILARITY_FLOOR = {
-    "LVP": 0.08,
-    "BRANDI": 0.08,
+    # Minimum acceptable similarity scores - very permissive
+    "LVP": 0.05,        # Lower from 0.08
+    "BRANDI": 0.05,     # Lower from 0.08
+    "RINNA": 0.05,      # Added
+    "EILEEN": 0.05,     # Added
 }
 DEFAULT_MIN_MARGIN = 0.0
 

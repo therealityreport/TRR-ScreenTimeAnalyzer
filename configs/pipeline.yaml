@@ -1,4 +1,4 @@
-# Harvest pipeline defaults tuned for stability and low fragmentation
+# Harvest pipeline defaults - OPTIMIZED FOR BRANDI + ALL CAST RECOGNITION
 
 # Frame sampling & detection
 stride: 1
@@ -32,7 +32,7 @@ fallback_head_pct: 0.4
 
 # Identity guard and stitching
 identity_guard: true
-identity_split: true
+identity_split: false  # CHANGED: Disabled to avoid fragmentation
 identity_sim_threshold: 0.62
 identity_min_picks: 3
 identity_guard_stride: 6
@@ -40,9 +40,9 @@ identity_guard_consecutive: 3
 identity_guard_cosine_reject: 0.35
 reindex_harvest_tracks: true
 stitch_identities: true
-stitch_sim: 0.45
-stitch_gap_ms: 8000
-stitch_min_iou: 0.10
+stitch_sim: 0.35  # CHANGED: Lower from 0.45 for more aggressive merging
+stitch_gap_ms: 12000  # CHANGED: Increased from 8000 to bridge larger gaps
+stitch_min_iou: 0.05  # CHANGED: Lower from 0.10 for more permissive stitching
 
 # Tracker pacing
 min_track_frames: 12
@@ -50,19 +50,19 @@ new_track_min_frames: 3
 max_new_tracks_per_sec: 2
 
 # Track gap handling
-max_gap_ms: 300
-min_run_ms: 600
+max_gap_ms: 2000  # CHANGED: Increased from 300 to bridge larger gaps
+min_run_ms: 300   # CHANGED: Decreased from 600 to keep shorter segments
 
 # Identity voting & persistence
-similarity_th: 0.78
-vote_decay: 0.99
-flip_tolerance: 0.30
+similarity_th: 0.35  # CHANGED: Dramatically lowered from 0.78 for weaker matches
+vote_decay: 0.95     # CHANGED: Lower from 0.99 to require fewer confirmations
+flip_tolerance: 0.40 # CHANGED: Higher from 0.30 to allow identity switches
 
 # Identity change detection
 identity_split_min_frames: 5
 identity_change_margin: 0.05
-identity_split_enabled: true
-embed_every_n: 2
+identity_split_enabled: false  # CHANGED: Disabled to match identity_split above
+embed_every_n: 1  # CHANGED: Embed EVERY frame with faces (was 2)
 
 # Progress reporting defaults
 progress_fallback_frames: 500
@@ -70,5 +70,5 @@ progress_fallback_frames: 500
 # Sample-based label fallback (uses harvested selected_samples)
 sample_label_fallback_enabled: true
 sample_label_min_votes: 1
-sample_label_min_score: 0.45
-sample_label_window_frames: 45
+sample_label_min_score: 0.25  # CHANGED: Lower from 0.45 for more permissive matching
+sample_label_window_frames: 90  # CHANGED: Increased from 45 for wider temporal window
