@@ -38,6 +38,14 @@ dilate_track_px: 0.25       # Larger person boxes
 temporal_iou_tolerance: 3   # Look back ±3 frames
 ```
 
+### Fallback head assignments
+
+- **`fallback_head_pct`** – When set above zero, unmatched faces are expanded by this
+  percentage to synthesize a head-sized person box. The harvest runner will treat
+  the synthetic box like a normal track so samples are still collected and written
+  to the manifest. Lower the value if fallback crops pull in too much background;
+  increase it if the synthetic head box misses chin/forehead coverage.
+
 ## Expected Improvements
 
 Based on the changes, you should see:

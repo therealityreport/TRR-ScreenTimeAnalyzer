@@ -318,6 +318,11 @@ class HarvestRunner:
             next_harvest_id += 1
             return hid
 
+        # Synthetic ByteTrack namespace used when we fall back to head-sized crops
+        fallback_head_pct = float(self.config.fallback_head_pct or 0.0)
+        fallback_enabled = fallback_head_pct > 0.0
+        next_fallback_byte_id = -1
+
         def _cosine(a: np.ndarray, b: np.ndarray) -> float:
             num = float((a * b).sum())
             den = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
@@ -540,6 +545,36 @@ class HarvestRunner:
 
             for face_idx in list(unmatched_faces):
                 face = face_dets[face_idx]
+                if fallback_enabled:
+                    fallback_byte_id = next_fallback_byte_id
+                    next_fallback_byte_id -= 1
+                    synth_person_bbox = self._dilate_bbox(
+                        face.bbox,
+                        fallback_head_pct,
+                        width,
+                        height,
+                    )
+                    assignments[fallback_byte_id] = AssignedFace(
+                        face_idx=face_idx,
+                        mode="fallback",
+                        overlap=0.0,
+                        score=float(face.score),
+                        person_bbox=synth_person_bbox,
+                        frame_offset=0,
+                    )
+                    unmatched_faces.discard(face_idx)
+                    log_frame_event(
+                        frame_idx,
+                        {
+                            "track_id": fallback_byte_id,
+                            "reason": "fallback_assignment",
+                            "face_bbox": list(map(float, face.bbox)),
+                            "person_bbox": list(map(float, synth_person_bbox)),
+                            "score": float(face.score),
+                        },
+                    )
+                    continue
+
                 best_track, best_iou, best_bbox = self._best_iou_track(
                     face.bbox,
                     track_lookup,
