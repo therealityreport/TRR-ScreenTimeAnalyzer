@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, MutableSet, Optional, Tuple
+from typing import Dict, Iterable, List, MutableSet, Optional, Tuple
 
 
 APP_VERSION = "labeler-0.1.0"

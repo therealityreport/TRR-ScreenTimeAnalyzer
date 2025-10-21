@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -349,6 +350,266 @@ def render_overlay_controls(harvest_dir: Path, video_path: Optional[Path], stem:
             )
 
 
+def safe_int(value) -> Optional[int]:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def canonical_sample_path(path: Path | str) -> str:
+    candidate = Path(path)
+    try:
+        return str(candidate.resolve())
+    except (OSError, RuntimeError):
+        return str(candidate.expanduser().absolute())
+
+
+def update_sample_csv_record(
+    harvest_dir: Path,
+    track_id: int,
+    frame: Optional[int],
+    original_path: Path,
+    action: str,
+    new_path: Optional[Path] = None,
+) -> bool:
+    csv_path = harvest_dir / "selected_samples.csv"
+    if not csv_path.exists():
+        return False
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:  # pragma: no cover - corrupt CSV handling
+        return False
+
+    if df.empty:
+        return False
+
+    track_series = pd.to_numeric(df.get("track_id"), errors="coerce")
+    mask = track_series == track_id if track_series is not None else pd.Series([False] * len(df))
+
+    if "frame" in df.columns and frame is not None:
+        frame_series = pd.to_numeric(df["frame"], errors="coerce")
+        mask &= frame_series == frame
+
+    if not mask.any() and "path" in df.columns:
+        normalized_target = canonical_sample_path(original_path)
+        normalized_series = df["path"].astype(str).map(canonical_sample_path)
+        mask = normalized_series == normalized_target
+
+    if not mask.any() and "path" in df.columns:
+        mask = df["path"].astype(str).str.endswith(original_path.name)
+
+    if not mask.any():
+        return False
+
+    if action == "delete":
+        df = df.loc[~mask].copy()
+    else:
+        if "picked" not in df.columns:
+            df["picked"] = True
+        if action == "unassign":
+            df.loc[mask, "picked"] = False
+            df.loc[mask, "reason"] = "manual_unassigned"
+        if (action in {"unassign", "path_update"}) and new_path is not None:
+            df.loc[mask, "path"] = str(new_path)
+
+    df.to_csv(csv_path, index=False)
+    return True
+
+
+def move_sample_to_unassigned_dir(harvest_dir: Path, track_id: int, sample_path: Path) -> Optional[Path]:
+    destination_dir = harvest_dir / "unassigned" / f"track_{track_id:04d}"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    if not sample_path.exists():
+        return None
+    dest_path = destination_dir / sample_path.name
+    counter = 1
+    while dest_path.exists():
+        dest_path = destination_dir / f"{sample_path.stem}_{counter:02d}{sample_path.suffix}"
+        counter += 1
+    shutil.move(str(sample_path), str(dest_path))
+    return dest_path
+
+
+def delete_sample_file(sample_path: Path) -> bool:
+    try:
+        sample_path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def find_alternate_sample_path(harvest_dir: Path, sample_path: Path) -> Optional[Path]:
+    if sample_path.exists():
+        return sample_path
+
+    parts = list(sample_path.parts)
+    for idx, part in enumerate(parts):
+        if part.startswith("track_"):
+            candidate = harvest_dir / Path(*parts[idx:])
+            if candidate.exists():
+                return candidate
+
+    matches = list((harvest_dir).rglob(sample_path.name))
+    if matches:
+        return matches[0]
+    return None
+
+
+def collect_pending_sample_actions(track_id: int, track_samples: pd.DataFrame) -> List[Tuple[int, str, pd.Series]]:
+    actions: List[Tuple[int, str, pd.Series]] = []
+    for idx, row in track_samples.iterrows():
+        key = f"sample_action_{track_id}_{idx}"
+        action = st.session_state.get(key, "Keep")
+        if action != "Keep":
+            actions.append((idx, action, row))
+    return actions
+
+
+def process_sample_actions(
+    harvest_dir: Path,
+    track_id: int,
+    actions: List[Tuple[int, str, pd.Series]],
+) -> List[str]:
+    messages: List[str] = []
+    for idx, action, row in actions:
+        sample_path = Path(str(row.get("path", "")))
+        frame_idx = safe_int(row.get("frame"))
+        original_path = sample_path
+        if not sample_path.exists():
+            fallback = find_alternate_sample_path(harvest_dir, sample_path)
+            if fallback is not None:
+                sample_path = fallback
+
+        if action == "Move to UNASSIGNED":
+            destination = move_sample_to_unassigned_dir(harvest_dir, track_id, sample_path)
+            if destination is None:
+                messages.append(f"Unable to relocate {original_path.name} (file missing)")
+            else:
+                update_sample_csv_record(harvest_dir, track_id, frame_idx, original_path, "unassign", destination)
+                messages.append(f"Moved {original_path.name} to UNASSIGNED")
+        elif action == "Delete":
+            if delete_sample_file(sample_path):
+                update_sample_csv_record(harvest_dir, track_id, frame_idx, original_path, "delete")
+                messages.append(f"Deleted {original_path.name}")
+            else:
+                messages.append(f"Unable to delete {original_path.name}")
+
+        st.session_state.pop(f"sample_action_{track_id}_{idx}", None)
+
+    if messages:
+        load_samples_cached.clear()
+    return messages
+
+
+def render_missing_samples_panel(
+    stem: str,
+    harvest_dir: Path,
+    track_id: int,
+    track_samples: pd.DataFrame,
+    target_label: Optional[str],
+) -> None:
+    missing_rows = []
+    for idx, row in track_samples.iterrows():
+        sample_path = Path(str(row.get("path", "")))
+        if not sample_path.exists():
+            missing_rows.append((idx, row))
+
+    if not missing_rows:
+        return
+
+    with st.expander("Missing / offline samples", expanded=False):
+        st.write(
+            "The following images were marked as rejected or could not be located on disk. "
+            "Use the tools below to locate replacements and include them in assignments."
+        )
+        for idx, row in missing_rows:
+            sample_path = Path(str(row.get("path", "")))
+            frame_idx = safe_int(row.get("frame"))
+            cols = st.columns([3, 2])
+            with cols[0]:
+                st.code(str(sample_path))
+                if frame_idx is not None:
+                    st.caption(f"Track {track_id:04d} • Frame {frame_idx:06d}")
+            with cols[1]:
+                locate_clicked = st.button(
+                    "Locate on disk",
+                    key=f"missing_locate_{track_id}_{idx}",
+                )
+                if locate_clicked:
+                    candidate = find_alternate_sample_path(harvest_dir, sample_path)
+                    if candidate is None:
+                        st.error("No matching file found inside the harvest directory.")
+                    else:
+                        update_sample_csv_record(harvest_dir, track_id, frame_idx, sample_path, "path_update", candidate)
+                        st.success(f"Linked to {candidate.name}")
+                        load_samples_cached.clear()
+                        st.rerun()
+
+                if target_label:
+                    assign_disabled = not sample_path.exists()
+                    assign_label = f"Assign to {target_label}" if not assign_disabled else "Assign once located"
+                    assign_clicked = st.button(
+                        assign_label,
+                        key=f"missing_assign_{track_id}_{idx}",
+                        disabled=assign_disabled,
+                        help="Locate the file before assigning." if assign_disabled else "Copy directly to the selected person.",
+                    )
+                    if assign_clicked and sample_path.exists():
+                        st.session_state["single_assign_job"] = {
+                            "stem": stem,
+                            "track_id": track_id,
+                            "byte_track_id": safe_int(row.get("byte_track_id")) or track_id,
+                            "path": str(sample_path),
+                            "label": target_label,
+                        }
+                        st.rerun()
+
+
+def render_facebank_browser(facebank_dir: Path) -> None:
+    labels = list_person_labels(str(facebank_dir))
+    if not labels:
+        st.info("No facebank entries found yet. Assign tracks to build the library.")
+        return
+
+    selected_person = st.selectbox("Person", labels, key="facebank_browser_person")
+    max_images = st.slider("Images to preview", min_value=8, max_value=120, value=32, step=4)
+
+    st.caption("Preview archived samples for the selected person to audit assignments.")
+
+    if not selected_person:
+        return
+
+    person_dir = facebank_dir / selected_person
+    if not person_dir.exists():
+        st.warning(f"No directory found for {selected_person}.")
+        return
+
+    images = [
+        p
+        for p in sorted(person_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    ]
+    if not images:
+        st.info("No images stored for this person yet.")
+        return
+
+    total = min(len(images), max_images)
+    cols_per_row = 6
+    rows = math.ceil(total / cols_per_row)
+    for row_idx in range(rows):
+        cols = st.columns(cols_per_row)
+        for col_idx in range(cols_per_row):
+            img_idx = row_idx * cols_per_row + col_idx
+            if img_idx >= total:
+                break
+            img_path = images[img_idx]
+            cols[col_idx].image(str(img_path), caption=img_path.name, use_column_width=True)
+
+
 def render_assignment_panel(
     stem: str,
     track_row: pd.Series,
@@ -363,6 +624,7 @@ def render_assignment_panel(
     summary_index: pd.DataFrame,
     cluster_id: Optional[int],
     cluster_tracks: Sequence[int],
+    clusters: Dict[int, List[int]],
 ) -> None:
     track_id = int(track_row["track_id"])
     byte_track_id = int(track_row["byte_track_id"])
@@ -375,6 +637,26 @@ def render_assignment_panel(
     if cluster_id is not None and cluster_track_list:
         track_list_str = ", ".join(f"{tid:04d}" for tid in cluster_track_list)
         st.info(f"Cluster {cluster_id:03d} → {len(cluster_track_list)} track(s): {track_list_str}")
+
+    current_cluster = cluster_id if cluster_id is not None else data_lib.UNASSIGNED_CLUSTER_ID
+    with st.expander("Cluster tools", expanded=False):
+        cluster_options = sorted(set(clusters.keys()) | {data_lib.UNASSIGNED_CLUSTER_ID})
+        cluster_labels = {
+            cid: "UNASSIGNED" if cid == data_lib.UNASSIGNED_CLUSTER_ID else f"Cluster {cid:03d}"
+            for cid in cluster_options
+        }
+        current_index = cluster_options.index(current_cluster) if current_cluster in cluster_options else 0
+        destination = st.selectbox(
+            "Cluster", cluster_options, index=current_index, format_func=lambda cid: cluster_labels[cid], key=f"cluster_select_{track_id}"
+        )
+        move_disabled = destination == current_cluster
+        if st.button("Move track", key=f"cluster_move_{track_id}", disabled=move_disabled):
+            data_lib.move_track_to_cluster(harvest_dir, clusters, track_id, destination)
+            load_clusters_cached.clear()
+            st.success(
+                f"Track {track_id:04d} moved to {cluster_labels[destination]}"
+            )
+            st.rerun()
 
 
     meta_cols = st.columns(4)
@@ -417,6 +699,11 @@ def render_assignment_panel(
         target_label = existing_label
     elif new_label.strip():
         target_label = new_label.strip().upper()
+
+    if target_label:
+        st.session_state["active_target_label"] = target_label
+    else:
+        st.session_state.pop("active_target_label", None)
 
     st.caption("Keyboard: A=Assign selected, N=Next cluster, Space=toggle focus sample.")
     assign_selected_disabled = target_label is None or not selected_paths
@@ -549,9 +836,19 @@ def render_assignment_panel(
 def render_thumbnail_grid(
     stem: str,
     track_id: int,
+    byte_track_id: int,
     track_samples: pd.DataFrame,
     thumbnails_dir: Path,
+    harvest_dir: Path,
+    assignment_info: Optional[data_lib.TrackAssignment],
+    target_label: Optional[str],
 ) -> None:
+    assigned_lookup: Dict[str, str] = {}
+    if assignment_info:
+        for source_path, person in assignment_info.source_to_person.items():
+            if person:
+                assigned_lookup[canonical_sample_path(source_path)] = person
+
     cols_per_row = 4
     rows = math.ceil(len(track_samples) / cols_per_row) or 1
     focus_key = f"focused_sample_{track_id}"
@@ -559,6 +856,9 @@ def render_thumbnail_grid(
     if focused_idx is None and not track_samples.empty:
         focused_idx = track_samples.index[0]
         st.session_state[focus_key] = focused_idx
+
+    action_options = ["Keep", "Move to UNASSIGNED", "Delete"]
+
     for row_idx in range(rows):
         cols = st.columns(cols_per_row)
         for col_idx in range(cols_per_row):
@@ -566,23 +866,16 @@ def render_thumbnail_grid(
             if sample_idx >= len(track_samples):
                 continue
             row = track_samples.iloc[sample_idx]
-            path = Path(row["path"])
+            sample_path = Path(str(row.get("path", "")))
             checkbox_key = f"sample_cb_{track_id}_{row.name}"
             default_checked = bool(row.get("picked")) and not bool(row.get("is_debug"))
             checked = initialize_sample_checkbox(track_id, row.name, default_checked)
-            
-            # The checkbox widget automatically manages its own session state
-            # We just read the value after creation, not set it manually
-            is_checked = cols[col_idx].checkbox(
-                " ",
-                value=checked,
-                key=checkbox_key,
-            )
-            
-            # Track focus changes when checkbox state changes
+
+            is_checked = cols[col_idx].checkbox(" ", value=checked, key=checkbox_key)
             if is_checked != checked:
                 st.session_state[focus_key] = row.name
                 focused_idx = row.name
+
             caption_parts = []
             if row.get("quality") is not None and not math.isnan(row.get("quality")):
                 caption_parts.append(f"Q {float(row['quality']):.2f}")
@@ -596,15 +889,67 @@ def render_thumbnail_grid(
                 caption_parts.append("DEBUG")
             if row.name == focused_idx:
                 caption_parts.insert(0, "★ Focus")
+
+            assigned_person = assigned_lookup.get(canonical_sample_path(sample_path))
             try:
-                thumb_path = thumb_lib.ensure_thumbnail(path, stem, thumbnails_dir)
-                cols[col_idx].image(
-                    str(thumb_path),
-                    width="stretch",
-                    caption=", ".join(caption_parts) if caption_parts else path.name,
-                )
+                thumb_path = thumb_lib.ensure_thumbnail(sample_path, stem, thumbnails_dir)
             except FileNotFoundError:
-                cols[col_idx].warning(f"Missing: {path}")
+                fallback = find_alternate_sample_path(harvest_dir, sample_path)
+                if fallback and fallback.exists():
+                    track_samples.at[row.name, "path"] = str(fallback)
+                    update_sample_csv_record(
+                        harvest_dir,
+                        track_id,
+                        safe_int(row.get("frame")),
+                        sample_path,
+                        "path_update",
+                        fallback,
+                    )
+                    load_samples_cached.clear()
+                    try:
+                        thumb_path = thumb_lib.ensure_thumbnail(fallback, stem, thumbnails_dir)
+                        sample_path = fallback
+                    except FileNotFoundError:
+                        cols[col_idx].warning(f"Missing: {sample_path}")
+                        continue
+                else:
+                    cols[col_idx].warning(f"Missing: {sample_path}")
+                    continue
+
+            caption = ", ".join(caption_parts) if caption_parts else sample_path.name
+            cols[col_idx].image(str(thumb_path), caption=caption, use_column_width=True)
+
+            if assigned_person:
+                cols[col_idx].markdown(
+                    f"<div style='text-align:center; background-color:#2d6cdf; color:white;"
+                    " padding:0.25rem 0.4rem; border-radius:0 0 6px 6px; font-size:0.75rem;'>"
+                    f"ASSIGNED • {assigned_person}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            action_key = f"sample_action_{track_id}_{row.name}"
+            cols[col_idx].selectbox(
+                "Action",
+                action_options,
+                key=action_key,
+                label_visibility="collapsed",
+            )
+
+            if target_label:
+                assign_disabled = not sample_path.exists()
+                if cols[col_idx].button(
+                    f"Assign → {target_label}",
+                    key=f"quick_assign_{track_id}_{row.name}",
+                    disabled=assign_disabled,
+                ):
+                    st.session_state["single_assign_job"] = {
+                        "stem": stem,
+                        "track_id": track_id,
+                        "byte_track_id": byte_track_id,
+                        "path": str(sample_path),
+                        "label": target_label,
+                    }
+                    st.rerun()
 
 
 def main() -> None:
@@ -645,6 +990,48 @@ def main() -> None:
         samples_df["cluster_id"] = samples_df["track_id"].map(track_to_cluster)
 
     assignments, assignment_index = load_assignments_cached(str(ASSIGNMENTS_LOG))
+    pending_job = st.session_state.pop("single_assign_job", None)
+    if pending_job:
+        if pending_job.get("stem") and pending_job.get("stem") != selected_stem:
+            st.session_state["single_assign_job"] = pending_job
+        else:
+            target_label = pending_job.get("label")
+            if not target_label:
+                st.error("Quick assignment failed: no person label selected.")
+            else:
+                try:
+                    normalized_label = assign_lib.normalize_label(target_label)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    job_path = Path(pending_job.get("path", ""))
+                    if not job_path.exists():
+                        st.error(f"Quick assignment failed: missing file {job_path}")
+                    else:
+                        existing_sources: set[str] = set()
+                        for details in assignment_index.values():
+                            existing_sources.update(details.sources)
+                        harvest_id = safe_int(pending_job.get("track_id")) or -1
+                        job_byte_track = safe_int(pending_job.get("byte_track_id"))
+                        if job_byte_track is None:
+                            job_byte_track = harvest_id
+                        result = assign_lib.assign_samples(
+                            [job_path],
+                            stem=selected_stem,
+                            harvest_id=harvest_id,
+                            byte_track_id=job_byte_track if job_byte_track is not None else harvest_id,
+                            person_label=normalized_label,
+                            facebank_dir=CLI_ARGS.facebank_dir,
+                            assignments_log=ASSIGNMENTS_LOG,
+                            existing_sources=existing_sources,
+                        )
+                        if result.copied:
+                            st.success(f"Assigned {job_path.name} to {normalized_label}.")
+                            load_assignments_cached.clear()
+                            assignments, assignment_index = load_assignments_cached(str(ASSIGNMENTS_LOG))
+                            list_person_labels.clear()
+                        else:
+                            st.info("No files copied for the quick assignment.")
     summary_df = data_lib.summarize_tracks(selected_stem, manifest_df, samples_df, assignment_index)
     if summary_df.empty:
         st.warning("No track summaries available.")
@@ -733,6 +1120,12 @@ def main() -> None:
 
     cluster_title = cluster_label or f"Track {active_track:04d}"
 
+    summary_row = filtered[filtered["track_id"] == active_track].iloc[0]
+    byte_track_id = int(summary_row.get("byte_track_id") or active_track)
+    track_key = data_lib.TrackKey(stem=selected_stem, harvest_id=active_track, byte_track_id=byte_track_id)
+    assignment_info = assignment_index.get(track_key)
+    current_target_label = st.session_state.get("active_target_label")
+
     nav_cols = st.columns([1, 3, 1])
     with nav_cols[0]:
         if st.button("◀ Previous", key="cluster_prev"):
@@ -773,16 +1166,30 @@ def main() -> None:
     with select_row[2]:
         st.caption("Toggle thumbnails to include them in assignment.")
 
+    feedback_messages = st.session_state.pop("image_action_feedback", None)
+    if feedback_messages:
+        for message in feedback_messages:
+            st.success(message)
+
     col_left, col_right = st.columns([3, 2])
 
     with col_left:
-        render_thumbnail_grid(selected_stem, active_track, track_samples, CLI_ARGS.thumbnails_dir)
+        render_thumbnail_grid(
+            selected_stem,
+            active_track,
+            byte_track_id,
+            track_samples,
+            CLI_ARGS.thumbnails_dir,
+            harvest_dir,
+            assignment_info,
+            current_target_label,
+        )
     selected_paths = gather_selected_samples(active_track, track_samples)
     with col_right:
         facebank_labels = list_person_labels(str(CLI_ARGS.facebank_dir))
         render_assignment_panel(
             selected_stem,
-            filtered[filtered["track_id"] == active_track].iloc[0],
+            summary_row,
             track_samples,
             selected_paths,
             CLI_ARGS.facebank_dir,
@@ -794,7 +1201,30 @@ def main() -> None:
             summary_index,
             active_cluster_id,
             clusters.get(active_cluster_id, []) if active_cluster_id is not None else [],
+            clusters,
         )
+
+    render_missing_samples_panel(
+        selected_stem,
+        harvest_dir,
+        active_track,
+        track_samples,
+        st.session_state.get("active_target_label"),
+    )
+
+    pending_actions = collect_pending_sample_actions(active_track, track_samples)
+    if pending_actions:
+        with st.expander("Pending image maintenance actions", expanded=True):
+            st.write(f"Queued {len(pending_actions)} action(s) for this track.")
+            if st.button("Apply image actions", key=f"apply_actions_{active_track}"):
+                messages = process_sample_actions(harvest_dir, active_track, pending_actions)
+                if messages:
+                    st.session_state["image_action_feedback"] = messages
+                else:
+                    st.session_state["image_action_feedback"] = ["No changes were made."]
+                st.rerun()
+    else:
+        st.caption("No image maintenance actions queued.")
 
     shortcut = current_shortcut()
     if shortcut == "assign":
@@ -820,6 +1250,9 @@ def main() -> None:
         st.rerun()
 
     render_bottom_tools(selected_stem, CLI_ARGS.facebank_dir, CLI_ARGS.video)
+
+    with st.expander("Facebank browser", expanded=False):
+        render_facebank_browser(CLI_ARGS.facebank_dir)
 
 
 def render_bottom_tools(stem: str, facebank_dir: Path, video_path: Optional[Path]) -> None:
