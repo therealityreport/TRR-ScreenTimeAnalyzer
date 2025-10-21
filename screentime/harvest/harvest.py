@@ -577,14 +577,16 @@ class HarvestRunner:
                 sample_path = crops_dir / harvest_dirname / sample_filename
                 debug_path = crops_dir / harvest_dirname / "debug" / sample_filename
 
-                if not self._passes_area_threshold(face.bbox, frame_area):
+                passes_area, area_debug = self._passes_area_threshold(
+                    face.bbox, frame_area, (width, height)
+                )
+                if not passes_area:
                     record_reject(
                         hid,
                         "rejected_area",
                         frame_idx,
                         {
-                            "bbox_area": bbox_area(face.bbox),
-                            "frame_area": frame_area,
+                            **area_debug,
                             "face_bbox": list(map(float, face.bbox)),
                             "person_bbox": list(map(float, assignment.person_bbox)),
                             "byte_track_id": byte_id,
@@ -940,13 +942,44 @@ class HarvestRunner:
         )
         return manifest_path
 
-    def _passes_area_threshold(self, bbox, frame_area: float) -> bool:
+    def _passes_area_threshold(
+        self,
+        bbox,
+        frame_area: float,
+        frame_dims: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[bool, Dict[str, Optional[float]]]:
         area = bbox_area(bbox)
-        if self.config.min_area_px and area < self.config.min_area_px:
-            return False
-        if area / frame_area < self.config.min_area_frac:
-            return False
-        return True
+        min_frac = max(float(self.config.min_area_frac), 0.0)
+        frac_px = float(frame_area * min_frac) if frame_area and min_frac > 0 else 0.0
+        configured_px = float(self.config.min_area_px) if self.config.min_area_px else 0.0
+
+        fallback_px = 0.0
+        if frame_dims and min_frac > 0:
+            width, height = frame_dims
+            shorter = float(min(width, height))
+            fallback_px = shorter * shorter * min_frac
+
+        candidates = [value for value in (frac_px, configured_px, fallback_px) if value > 0.0]
+        effective_px = min(candidates) if candidates else 0.0
+
+        area_ratio = float(area / frame_area) if frame_area else 0.0
+        passes = True
+        if effective_px > 0.0 and area < effective_px:
+            passes = False
+        elif effective_px == 0.0 and min_frac > 0.0 and area_ratio < min_frac:
+            passes = False
+
+        debug: Dict[str, Optional[float]] = {
+            "bbox_area": float(area),
+            "frame_area": float(frame_area),
+            "area_ratio": area_ratio,
+            "min_area_frac": min_frac,
+            "min_area_frac_px": frac_px if frac_px > 0.0 else None,
+            "min_area_px_config": configured_px if configured_px > 0.0 else None,
+            "min_area_px_fallback": fallback_px if fallback_px > 0.0 else None,
+            "effective_min_area_px": effective_px if effective_px > 0.0 else None,
+        }
+        return passes, debug
 
     def _passes_sharpness_threshold(self, sharpness: float) -> bool:
         if self.config.min_sharpness_laplacian is None:
