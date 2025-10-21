@@ -64,7 +64,9 @@ def test_threshold_rejects_small_area_and_blur():
 
     frame_area = 10000.0  # e.g., 100x100 frame
     small_bbox = (0.0, 0.0, 5.0, 5.0)  # area = 25 -> area_frac = 0.0025 < 0.003
-    assert not runner._passes_area_threshold(small_bbox, frame_area)
+    passes, debug = runner._passes_area_threshold(small_bbox, frame_area)
+    assert not passes
+    assert debug["effective_min_area_px"] == debug["min_area_frac_px"]
 
     sharpness_good = 150.0
     sharpness_bad = 80.0
@@ -110,6 +112,22 @@ def test_frontalness_gate_marks_reason():
     exported = state.export_samples(config)
     assert not exported
     assert state.candidates[0].reason == "rejected_frontalness"
+
+
+def test_high_res_frame_uses_adaptive_area_floor():
+    runner = build_runner()
+    runner.config.min_area_frac = 0.005
+
+    width, height = 3840, 2160  # 4K UHD frame
+    frame_area = float(width * height)
+    bbox = (0.0, 0.0, 160.0, 160.0)  # area = 25_600 px^2
+
+    passes, debug = runner._passes_area_threshold(bbox, frame_area, (width, height))
+
+    assert passes
+    assert debug["area_ratio"] < runner.config.min_area_frac
+    assert debug["effective_min_area_px"] == debug["min_area_px_fallback"]
+    assert debug["effective_min_area_px"] < debug["min_area_frac_px"]
 
 
 def test_sharpness_percentile_gate():
