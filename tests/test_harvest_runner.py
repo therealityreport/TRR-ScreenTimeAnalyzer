@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from screentime.harvest.harvest import HarvestConfig, HarvestRunner
 from screentime.io_utils import infer_video_stem
@@ -80,3 +81,36 @@ def test_harvest_runner_respects_explicit_root(tmp_path):
     assert manifest_path.parent == explicit_dir
     nested_path = explicit_dir / infer_video_stem(video_path)
     assert not nested_path.exists(), "Legacy-style nested directory should not be created for explicit roots."
+
+
+def test_harvest_runner_disables_embeddings_when_guard_off(tmp_path):
+    video_path = tmp_path / "blank.mp4"
+    _create_blank_video(video_path)
+
+    config = HarvestConfig(
+        identity_guard=False,
+        identity_split=False,
+        samples_per_track=1,
+        write_candidates=False,
+        reindex_harvest_tracks=True,
+        stitch_identities=False,
+    )
+
+    runner = HarvestRunner(_NullPersonDetector(), _NullFaceDetector(), _NullTracker(), config)
+    output_root = tmp_path / "no_guard"
+    runner.run(video_path, output_root)
+
+    assert runner.embedder is None, "Identity guard disabled should leave embedder unset."
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed = MagicMock()
+    runner_with_mock = HarvestRunner(
+        _NullPersonDetector(),
+        _NullFaceDetector(),
+        _NullTracker(),
+        config,
+        embedder=mock_embedder,
+    )
+    mock_output = tmp_path / "no_guard_mock"
+    runner_with_mock.run(video_path, mock_output)
+    mock_embedder.embed.assert_not_called()
