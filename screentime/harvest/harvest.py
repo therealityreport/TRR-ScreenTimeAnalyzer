@@ -275,7 +275,14 @@ class HarvestRunner:
         # ArcFace embedder for identity consistency checks (lazy)
         self.embedder = embedder
 
-    def run(self, video_path: Path, output_root: Path, *, legacy_layout: bool = True) -> Path:
+    def run(
+        self,
+        video_path: Path,
+        output_root: Path,
+        *,
+        legacy_layout: bool = True,
+        cap: Optional[cv2.VideoCapture] = None,
+    ) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
         if self.config.identity_guard and self.embedder is None:
             try:
@@ -284,14 +291,20 @@ class HarvestRunner:
                 raise RuntimeError(
                     "ArcFace embedder unavailable; identity_guard requires embeddings to run"
                 ) from exc
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
+        capture = cap
+        owns_cap = False
+        if capture is None:
+            capture = cv2.VideoCapture(str(video_path))
+            owns_cap = True
+        if not capture.isOpened():
             raise RuntimeError(f"Unable to open video {video_path}")
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        cap = capture
+
+        fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_area = float(width * height)
         self.tracker.set_frame_rate(fps)
 
@@ -1059,7 +1072,8 @@ class HarvestRunner:
                 next_progress_log = last_frames_seen
             log_progress(last_frames_seen)
 
-        cap.release()
+        if owns_cap:
+            cap.release()
         finished_tracks.extend(accumulator.flush())
 
         selection_map: Dict[int, List[FaceSample]] = {}
