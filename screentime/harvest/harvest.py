@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +80,9 @@ class HarvestConfig:
     stitch_sim: float = 0.45
     stitch_gap_ms: float = 8000.0
     stitch_min_iou: float = 0.1
+    profile_quota: int = 0
+    profile_ratio: Optional[float] = None
+    profile_min_frontalness: Optional[float] = None
 
 
 @dataclass
@@ -161,16 +165,54 @@ class TrackSamplingState:
         sharp_gate = max(sharp_thresholds) if sharp_thresholds else None
 
         eligible_candidates: List[SampleCandidate] = []
+        profile_candidates: List[SampleCandidate] = []
+        profile_limit = 0
+        if config.profile_quota or config.profile_ratio:
+            limit = int(config.profile_quota or 0)
+            if config.profile_ratio:
+                ratio = max(float(config.profile_ratio), 0.0)
+                base = max(int(config.samples_per_track), 1)
+                limit = max(limit, int(math.ceil(base * ratio)))
+            profile_limit = max(limit, 0)
+        profile_enabled = profile_limit > 0
+        profile_min_frontalness = (
+            float(config.profile_min_frontalness)
+            if config.profile_min_frontalness is not None
+            else 0.0
+        )
+
         for candidate in sorted_candidates:
-            if candidate.frontalness < config.min_frontalness:
-                candidate.reason = "rejected_frontalness"
-                continue
             if sharp_gate is not None and candidate.sharpness < sharp_gate:
                 candidate.reason = "rejected_sharpness"
+                continue
+            if candidate.frontalness < config.min_frontalness:
+                if profile_enabled and candidate.frontalness >= profile_min_frontalness:
+                    candidate.reason = "profile_candidate"
+                    profile_candidates.append(candidate)
+                else:
+                    candidate.reason = "rejected_frontalness"
                 continue
             eligible_candidates.append(candidate)
 
         if not eligible_candidates:
+            if profile_enabled and profile_candidates:
+                profile_candidates.sort(
+                    key=lambda c: (c.sharpness, c.area_frac, c.quality),
+                    reverse=True,
+                )
+                allowance = min(profile_limit, config.samples_per_track, len(profile_candidates))
+                for cand in profile_candidates[:allowance]:
+                    cand.picked = True
+                    cand.reason = "picked_profile"
+                    selected.append(cand)
+                for cand in profile_candidates[allowance:]:
+                    if cand.reason == "profile_candidate":
+                        cand.reason = "profile_not_selected"
+                selected.sort(key=lambda c: c.sample.frame_idx)
+                return [c.sample for c in selected]
+            for cand in profile_candidates:
+                if cand.reason == "profile_candidate":
+                    cand.reason = "profile_not_selected"
             return []
 
         required = min(config.samples_per_track, len(eligible_candidates))
@@ -231,6 +273,9 @@ class TrackSamplingState:
         for candidate in eligible_candidates:
             if not candidate.picked and candidate.reason is None:
                 candidate.reason = "not_selected"
+        for candidate in profile_candidates:
+            if not candidate.picked and candidate.reason == "profile_candidate":
+                candidate.reason = "profile_not_selected"
 
         return [c.sample for c in selected]
 

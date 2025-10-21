@@ -157,3 +157,72 @@ def test_export_samples_ensures_frontal_quota():
     selected = state.export_samples(config)
     assert len(selected) == 4
     assert sum(1 for sample in selected if sample.frontalness >= 0.3) >= config.min_frontal_picks
+
+
+def test_profile_quota_picks_when_no_frontal_candidates():
+    config = HarvestConfig(
+        min_frontalness=0.8,
+        samples_per_track=3,
+        profile_quota=2,
+        profile_min_frontalness=0.4,
+    )
+    state = TrackSamplingState()
+
+    def add_candidate(frame_idx: int, sharpness: float, area: float, frontal: float) -> None:
+        sample = FaceSample(
+            track_id=1,
+            frame_idx=frame_idx,
+            timestamp_ms=frame_idx * 33.0,
+            path=Path(f"/tmp/profile_{frame_idx}.jpg"),
+            score=0.9,
+            bbox=(0, 0, 10, 10),
+            sharpness=sharpness,
+            frontalness=frontal,
+            quality=0.8,
+            area_frac=area,
+        )
+        state.add_candidate(sample, 0.8, sharpness, frontal, area, "profile", config)
+
+    add_candidate(0, 150.0, 0.02, 0.6)
+    add_candidate(5, 250.0, 0.03, 0.5)
+    add_candidate(10, 200.0, 0.01, 0.45)
+
+    selected = state.export_samples(config)
+    assert [sample.frame_idx for sample in selected] == [0, 5]
+    reasons = {cand.sample.frame_idx: cand.reason for cand in state.candidates}
+    assert reasons[0] == "picked_profile"
+    assert reasons[5] == "picked_profile"
+    assert reasons[10] == "profile_not_selected"
+
+
+def test_profile_ratio_caps_profile_allocation():
+    config = HarvestConfig(
+        min_frontalness=0.9,
+        samples_per_track=4,
+        profile_ratio=0.25,
+        profile_min_frontalness=0.5,
+    )
+    state = TrackSamplingState()
+
+    for idx, sharpness in enumerate([300.0, 250.0, 275.0], start=1):
+        sample = FaceSample(
+            track_id=1,
+            frame_idx=idx * 10,
+            timestamp_ms=float(idx * 40),
+            path=Path(f"/tmp/profile_ratio_{idx}.jpg"),
+            score=0.9,
+            bbox=(0, 0, 10, 10),
+            sharpness=sharpness,
+            frontalness=0.6,
+            quality=0.7 + idx * 0.01,
+            area_frac=0.02 + idx * 0.001,
+        )
+        state.add_candidate(sample, sample.quality, sharpness, sample.frontalness, sample.area_frac, "profile", config)
+
+    selected = state.export_samples(config)
+    assert len(selected) == 1
+    assert selected[0].frame_idx == 10
+    reasons = {cand.sample.frame_idx: cand.reason for cand in state.candidates}
+    assert reasons[10] == "picked_profile"
+    assert reasons[20] == "profile_not_selected"
+    assert reasons[30] == "profile_not_selected"
