@@ -13,13 +13,13 @@ First, run diagnostics to see what's being detected and what's being rejected:
 ```bash
 # Analyze a sample of frames
 python scripts/diagnose_harvest.py \
-    --video data/RHOBH-TEST.mp4 \
+    --video data/RHOBH-TEST-v2.mp4 \
     --sample 100 \
     --output diagnostics/rhobh_test
 
 # Or analyze a specific frame range
 python scripts/diagnose_harvest.py \
-    --video data/RHOBH-TEST.mp4 \
+    --video data/RHOBH-TEST-v2.mp4 \
     --frames 500-700 \
     --save-frames \
     --output diagnostics/rhobh_test
@@ -41,13 +41,14 @@ This will:
 ```bash
 # Use original config
 python scripts/harvest_faces.py \
-    data/RHOBH-TEST.mp4 \
+    data/RHOBH-TEST-v2.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --pipeline-config configs/pipeline_original.yaml \
-    --output-dir data/harvest
+    --harvest-dir data/harvest/RHOBH-TEST-v2-v2_original \
+    --threads 1 \
+    --progress-interval 1 \
+    --heartbeat-sec 2
 
-# Move results for comparison
-mv data/harvest/RHOBH-TEST data/harvest/RHOBH-TEST_original
 ```
 
 ### 3. Run Harvest with Optimized Config
@@ -55,17 +56,30 @@ mv data/harvest/RHOBH-TEST data/harvest/RHOBH-TEST_original
 ```bash
 # Use optimized config (now the default)
 python scripts/harvest_faces.py \
-    data/RHOBH-TEST.mp4 \
+    data/RHOBH-TEST-v2.mp4 \
     --person-weights models/weights/yolov8n.pt \
-    --output-dir data/harvest
+    --harvest-dir data/harvest/RHOBH-TEST-v2 \
+    --threads 1 \
+    --progress-interval 1 \
+    --heartbeat-sec 2
 ```
+
+Add `--fast` when you need a quick low-heat sanity pass (stride = 2, RetinaFace 640, deferred embeddings).
+
+### Live Monitoring
+
+- Watch `progress.json` update in real time:
+  ```bash
+  watch -n 2 jq '.' data/harvest/RHOBH-TEST-v2/progress.json
+  ```
+- Or tail the terminal output—heartbeats fire every 2 s by default so you see activity within ~10 s of starting.
 
 ### 4. Compare Results
 
 ```bash
 python scripts/compare_harvests.py \
-    --before data/harvest/RHOBH-TEST_original \
-    --after data/harvest/RHOBH-TEST \
+    --before data/harvest/RHOBH-TEST-v2-v2_original \
+    --after data/harvest/RHOBH-TEST-v2 \
     --output diagnostics/harvest_comparison
 ```
 
@@ -78,11 +92,11 @@ This generates:
 
 ```bash
 # Quick validation
-python scripts/validate_harvest.py data/harvest/RHOBH-TEST
+python scripts/validate_harvest.py data/harvest/RHOBH-TEST-v2
 
 # Detailed validation with per-track stats
 python scripts/validate_harvest.py \
-    data/harvest/RHOBH-TEST \
+    data/harvest/RHOBH-TEST-v2 \
     --show-tracks \
     --output diagnostics/validation
 ```
@@ -118,8 +132,16 @@ python scripts/harvest_faces.py \
     data/video.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --pipeline-config configs/pipeline_permissive.yaml \
-    --output-dir data/harvest
+    --harvest-dir data/harvest/video \
+    --threads 1 \
+    --progress-interval 1 \
+    --heartbeat-sec 2
 ```
+
+### macOS / Apple Silicon
+
+- The harvest pipeline now prefers CoreML for RetinaFace and ArcFace automatically on arm64; no flag required.
+- If CoreML is unavailable, it falls back to CPU but keeps the thread cap you set with `--threads`.
 
 ### `configs/pipeline_original.yaml`
 

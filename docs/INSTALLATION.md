@@ -9,7 +9,7 @@ If you're getting `ModuleNotFoundError: No module named 'screentime'`, use this 
 export PYTHONPATH="${PWD}:${PYTHONPATH}"
 
 # Now run scripts normally
-python scripts/diagnose_harvest.py --video data/RHOBH-TEST.mp4 --sample 100
+python scripts/diagnose_harvest.py --video data/RHOBH-TEST-v2.mp4 --sample 100
 ```
 
 Or source the helper script:
@@ -34,8 +34,8 @@ pip install -e .
 
 After this, you can run scripts from anywhere:
 ```bash
-python scripts/diagnose_harvest.py --video data/RHOBH-TEST.mp4 --sample 100
-python scripts/validate_harvest.py data/harvest/RHOBH-TEST
+python scripts/diagnose_harvest.py --video data/RHOBH-TEST-v2.mp4 --sample 100
+python scripts/validate_harvest.py data/harvest/RHOBH-TEST-v2
 ```
 
 ## Verify Installation
@@ -54,8 +54,8 @@ The existing labeler app already handles imports correctly, so it works without 
 
 ```bash
 streamlit run app/labeler.py -- \
-    --harvest-dir data/harvest/RHOBH-TEST \
-    --video data/RHOBH-TEST.mp4
+    --harvest-dir data/harvest/RHOBH-TEST-v2 \
+    --video data/RHOBH-TEST-v2.mp4
 ```
 
 ## Troubleshooting
@@ -143,7 +143,7 @@ chmod +x scripts/test_harvest_tools.sh
 
 # 2. Run diagnostics
 python scripts/diagnose_harvest.py \
-    --video data/RHOBH-TEST.mp4 \
+    --video data/RHOBH-TEST-v2.mp4 \
     --sample 100 \
     --output diagnostics/analysis
 

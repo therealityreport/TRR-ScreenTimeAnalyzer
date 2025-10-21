@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import platform
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -12,25 +11,37 @@ import numpy as np
 
 from screentime.types import l2_normalize
 
+try:  # pragma: no cover - optional dependency
+    import onnxruntime as ort  # type: ignore
+except Exception:  # pragma: no cover
+    ort = None
+
 LOGGER = logging.getLogger("screentime.recognition.embed")
 
 
 def _default_providers() -> Tuple[str, ...]:
     """Choose default ONNX providers based on platform."""
-    system = platform.system()
-    machine = platform.machine().lower()
-    if system == "Darwin" and machine in {"arm64", "aarch64"}:
-        return ("CoreMLExecutionProvider", "CPUExecutionProvider")
-    return ("CPUExecutionProvider",)
+    if ort is None:
+        return ("CPUExecutionProvider",)
+    available = {provider for provider in ort.get_available_providers()}
+    providers: list[str] = []
+    if "CoreMLExecutionProvider" in available and platform.machine().lower() == "arm64":
+        providers.append("CoreMLExecutionProvider")
+    if "CPUExecutionProvider" in available:
+        providers.append("CPUExecutionProvider")
+    return tuple(providers) if providers else ("CPUExecutionProvider",)
 
 
 class ArcFaceEmbedder:
     """Loads an ArcFace ONNX model via InsightFace for embedding extraction."""
 
-    def __init__(self, model_path: Optional[str] = None, providers: Optional[Sequence[str]] = None) -> None:
-        os.environ.setdefault("OMP_NUM_THREADS", "2")
-        os.environ.setdefault("MKL_NUM_THREADS", "2")
-        os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "2")
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        providers: Optional[Sequence[str]] = None,
+        threads: int = 1,
+        session_options=None,
+    ) -> None:
         try:
             from insightface.model_zoo import get_model
         except ImportError as exc:  # pragma: no cover - import guard
@@ -48,13 +59,29 @@ class ArcFaceEmbedder:
             provider_list = _default_providers()
         else:
             provider_list = tuple(providers)
+        if "CPUExecutionProvider" not in provider_list:
+            provider_list = tuple(list(provider_list) + ["CPUExecutionProvider"])
+
+        session_opts = session_options
+        if session_opts is None and ort is not None:
+            try:
+                session_opts = ort.SessionOptions()
+                session_opts.intra_op_num_threads = max(1, int(threads))
+                session_opts.inter_op_num_threads = 1
+            except Exception:  # pragma: no cover - optional
+                session_opts = None
+
         LOGGER.info("Loading ArcFace model %s providers=%s", resolved, provider_list)
-        model = get_model(resolved, download=True, providers=list(provider_list))
+        model = get_model(resolved, download=True, providers=list(provider_list), sess_options=session_opts)
         if model is None:
             LOGGER.info("Falling back to FaceAnalysis recognition model")
             from insightface.app import FaceAnalysis
 
-            analysis = FaceAnalysis(name="buffalo_l", providers=list(provider_list))
+            analysis = FaceAnalysis(
+                name="buffalo_l",
+                providers=list(provider_list),
+                sess_options=session_opts,
+            )
             analysis.prepare(ctx_id=0)
             model = analysis.models.get("recognition")
             if model is None:

@@ -20,3 +20,5 @@ data/**/*.parquet
 data/**/*.csv
 .thumbnails/
 tracker.log
+.thumbnails/
+diagnostics/

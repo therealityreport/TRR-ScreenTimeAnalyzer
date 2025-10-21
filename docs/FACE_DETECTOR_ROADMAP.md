@@ -12,7 +12,7 @@
 python scripts/harvest_faces.py VIDEO.mp4 \
     --person-weights models/weights/yolov8n.pt \
     --retina-det-size 640 640 \
-    --output-dir data/harvest
+    --harvest-dir data/harvest/VIDEO
 ```
 **Pros:** 2-3x faster than CPU, cooler  
 **Cons:** May miss some distant faces
@@ -27,7 +27,7 @@ python scripts/harvest_faces.py VIDEO.mp4 \
     --retina-det-size 640 640 \
     --fast \
     --onnx-providers CPUExecutionProvider \
-    --output-dir data/harvest
+    --harvest-dir data/harvest/VIDEO
 ```
 **Pros:** Coolest, most stable  
 **Cons:** Slowest
