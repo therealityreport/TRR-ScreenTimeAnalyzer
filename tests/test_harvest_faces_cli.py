@@ -1,8 +1,56 @@
 from __future__ import annotations
 
 import csv
+import math
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+try:
+    import cv2  # type: ignore
+except ImportError:  # pragma: no cover - fallback for headless test envs
+    class _StubCapture:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._opened = True
+
+        def isOpened(self) -> bool:
+            return self._opened
+
+        def get(self, _prop: int) -> float:
+            return 0.0
+
+        def release(self) -> None:
+            self._opened = False
+
+        def read(self):
+            return False, None
+
+        def set(self, *_args, **_kwargs) -> None:
+            pass
+
+    class _Cv2Stub:  # pragma: no cover - fallback for CI
+        CAP_PROP_FPS = 5
+        CAP_PROP_FRAME_COUNT = 7
+        CAP_PROP_FRAME_HEIGHT = 1
+        CAP_PROP_FRAME_WIDTH = 2
+        CAP_PROP_POS_FRAMES = 0
+
+        def __init__(self) -> None:
+            self.VideoCapture = _StubCapture
+
+        def setNumThreads(self, *_args, **_kwargs) -> None:
+            pass
+
+        def cvtColor(self, *_args, **_kwargs):
+            return None
+
+        def __getattr__(self, name: str):
+            if name.isupper():
+                return 0
+            raise AttributeError(name)
+
+    cv2 = _Cv2Stub()  # type: ignore
+    sys.modules["cv2"] = cv2
 
 import pytest
 import numpy as np
@@ -103,7 +151,7 @@ def test_cpu_preset_applies_defaults_for_cpu_only(tmp_path: Path, monkeypatch: p
         def __init__(self, person_detector, face_detector, tracker, config):
             results["config_stride"] = config.stride
 
-        def run(self, video, output_root, legacy_layout=True):
+        def run(self, video, output_root, legacy_layout=True, cap=None):
             manifest_root = Path(output_root)
             manifest_root.mkdir(parents=True, exist_ok=True)
             manifest = manifest_root / "manifest.json"
@@ -127,6 +175,9 @@ def test_scene_aware_sampler_positions(tmp_path: Path, monkeypatch: pytest.Monke
     video_path = tmp_path / "short.mp4"
     video_path.write_bytes(b"0")
     harvest_dir = tmp_path / "harvest_out"
+def test_samples_per_sec_derives_stride(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    video_path = tmp_path / "episode.mp4"
+    video_path.write_bytes(b"0")
 
     args = harvest_faces.parse_args(
         [
@@ -155,6 +206,20 @@ def test_scene_aware_sampler_positions(tmp_path: Path, monkeypatch: pytest.Monke
     class DummyCapture:
         def __init__(self, path: str) -> None:
             self._released = False
+            "--person-weights",
+            "weights.pt",
+            "--harvest-dir",
+            str(tmp_path / "harvest"),
+            "--samples-per-sec",
+            "5",
+        ]
+    )
+
+    monkeypatch.setattr(harvest_faces, "parse_args", lambda: args)
+
+    class DummyCapture:
+        def __init__(self) -> None:
+            self.released = False
 
         def isOpened(self) -> bool:
             return True
@@ -216,3 +281,36 @@ def test_scene_aware_sampler_positions(tmp_path: Path, monkeypatch: pytest.Monke
         assert sorted(indices_by_scene[scene_idx]) == [0, 1, 2]
         pos_sorted = sorted(round(val, 1) for val in positions_by_scene[scene_idx])
         assert pos_sorted == [0.1, 0.5, 0.9]
+            if prop == harvest_faces.cv2.CAP_PROP_FPS:
+                return 29.97
+            return 0.0
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = DummyCapture()
+    monkeypatch.setattr(harvest_faces.cv2, "VideoCapture", lambda path: capture)
+
+    monkeypatch.setattr(harvest_faces, "configure_threads", lambda threads: None)
+    monkeypatch.setattr(harvest_faces, "build_session_options", lambda threads: None)
+    monkeypatch.setattr(harvest_faces, "setup_logging", lambda: None)
+
+    def unexpected_scene(*_args, **_kwargs):
+        raise AssertionError("scene aware not expected")
+
+    monkeypatch.setattr(harvest_faces, "run_scene_aware_harvest", unexpected_scene)
+
+    observed: dict[str, object] = {}
+
+    def fake_run_standard(args_param, cap):
+        observed["stride"] = args_param.stride
+        observed["cap"] = cap
+
+    monkeypatch.setattr(harvest_faces, "run_standard_harvest", fake_run_standard)
+
+    harvest_faces.main()
+
+    expected_stride = math.ceil(29.97 / 5.0)
+    assert observed["stride"] == expected_stride
+    assert observed["cap"] is capture
+    assert capture.released is True
