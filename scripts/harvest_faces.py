@@ -284,13 +284,18 @@ def parse_args() -> argparse.Namespace:
         "--min-frontalness",
         type=float,
         default=None,
-        help="Override minimum frontalness required for selection eligibility",
+        help=(
+            "Override minimum frontalness required for selection eligibility. "
+            "When unset, the CLI uses the pipeline config value before falling back to 0.20."
+        ),
     )
     parser.add_argument(
         "--frontalness-thresh",
         type=float,
         default=None,
-        help="Alias for --min-frontalness (defaults to pipeline config value, or 0.20 if unspecified).",
+        help=(
+            "Alias for --min-frontalness. Precedence: CLI flag → pipeline min_frontalness → 0.20 fallback."
+        ),
     )
     parser.add_argument(
         "--min-sharpness-pct",
@@ -510,6 +515,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
     cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
+    min_frontalness = _resolve_min_frontalness(args, pipeline_cfg)
 
     video_stem = infer_video_stem(args.video)
     legacy_layout = args.harvest_dir is None
@@ -540,10 +546,12 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     if getattr(args, "_cpu_preset", False):
         stride_for_log = args.stride if args.stride is not None else pipeline_cfg.get("stride", 1)
         LOGGER.info(
-            "Applying CPU preset: stride=%s, detector=%dx%d. Override with --stride or --retina-det-size.",
+            "Applying CPU preset: stride=%s, detector=%dx%d, min_frontalness=%s. "
+            "Override with --stride/--retina-det-size or --min-frontalness.",
             stride_for_log,
             det_size[0],
             det_size[1],
+            min_frontalness,
         )
 
     person_detector = YOLOPersonDetector(
@@ -572,7 +580,6 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
-    min_frontalness = _resolve_min_frontalness(args, pipeline_cfg)
     sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
     if sharpness_pctile is None:
         legacy_pct = pipeline_cfg.get("min_sharpness_pct")
