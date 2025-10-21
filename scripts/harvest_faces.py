@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import os
 from collections import Counter
 import shutil
@@ -140,7 +141,49 @@ def build_session_options(thread_count: int):
     return session_options
 
 
-def parse_args() -> argparse.Namespace:
+def _parse_scene_probe_positions(raw: str | Sequence[float] | None) -> tuple[float, ...]:
+    """Normalize probe position inputs into a sorted tuple between 0 and 1."""
+
+    if raw is None:
+        return (0.1, 0.5, 0.9)
+
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        values = list(raw)
+    else:
+        items = str(raw).split(",")
+        values = []
+        for item in items:
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                values.append(float(item))
+            except ValueError:
+                continue
+
+    probes: list[float] = []
+    for value in values:
+        if not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(float(value)):
+            continue
+        probes.append(float(value))
+
+    if not probes:
+        return (0.1, 0.5, 0.9)
+
+    clipped = [min(1.0, max(0.0, probe)) for probe in probes]
+    clipped.sort()
+    deduped: list[float] = []
+    last: Optional[float] = None
+    for probe in clipped:
+        if last is None or not math.isclose(last, probe, rel_tol=1e-6, abs_tol=1e-6):
+            deduped.append(probe)
+            last = probe
+    return tuple(deduped)
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
@@ -356,10 +399,18 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="Emit a heartbeat log at this interval in seconds (default: 2s).",
     )
+    parser.set_defaults(scene_aware=None)
     parser.add_argument(
         "--scene-aware",
+        dest="scene_aware",
         action="store_true",
         help="Use scene/shot detection and sample a few frames per scene.",
+    )
+    parser.add_argument(
+        "--no-scene-aware",
+        dest="scene_aware",
+        action="store_false",
+        help="Disable scene/shot sampling (overrides auto-detection).",
     )
     parser.add_argument("--scene-threshold", type=float, default=27.0, help="Scene detection threshold.")
     parser.add_argument(
@@ -373,6 +424,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="How many frames to probe per scene (evenly spaced between 20% and 80%).",
+    )
+    parser.add_argument(
+        "--scene-autoscale-threshold",
+        type=float,
+        default=180.0,
+        help="Automatically enable scene-aware sampling when duration (seconds) is at or below this value (<=0 to disable).",
+    )
+    parser.add_argument(
+        "--scene-probes",
+        type=str,
+        default="0.1,0.5,0.9",
+        help="Comma-separated normalized offsets to probe within a scene (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--scene-probe-interval",
+        type=float,
+        default=30.0,
+        help="Approximate seconds between probes when expanding scene samples (<=0 disables scaling).",
     )
     parser.add_argument(
         "--min-face-frac",
@@ -421,7 +490,9 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable the relaxed recall pass.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    args.scene_probes = _parse_scene_probe_positions(getattr(args, "scene_probes", None))  # type: ignore[assignment]
+    return args
 
 def _resolve_existing_path(path_str: str, nested_dir: Path) -> Path:
     candidate = Path(path_str)
@@ -452,6 +523,91 @@ def _relativize_to_harvest(path_str: str, nested_dir: Path, harvest_dir: Path) -
         if part.startswith("track_"):
             return Path(*parts[idx:]).as_posix()
     return abs_path.name
+
+
+def _generate_scene_probe_positions(sample_count: int, base_positions: Sequence[float]) -> np.ndarray:
+    """Generate normalized probe positions ensuring first/middle/last coverage."""
+
+    if sample_count <= 0:
+        return np.array([0.5], dtype=float)
+
+    base = list(base_positions)
+    if not base:
+        base = [0.1, 0.5, 0.9]
+    base = [min(1.0, max(0.0, float(pos))) for pos in base]
+    base.sort()
+
+    if len(base) == 1:
+        return np.full(sample_count, base[0], dtype=float)
+
+    if sample_count == 1:
+        center_idx = min(range(len(base)), key=lambda idx: abs(base[idx] - 0.5))
+        return np.array([base[center_idx]], dtype=float)
+
+    if sample_count <= len(base):
+        raw_indices = np.linspace(0, len(base) - 1, sample_count)
+        chosen: list[int] = []
+        last_idx = -1
+        max_idx = len(base) - 1
+        for raw in raw_indices:
+            idx = int(round(raw))
+            idx = max(0, min(max_idx, idx))
+            if idx <= last_idx and last_idx < max_idx:
+                idx = last_idx + 1
+            chosen.append(idx)
+            last_idx = idx
+        return np.array([base[idx] for idx in chosen], dtype=float)
+
+    start = base[0]
+    end = base[-1]
+    if math.isclose(start, end, rel_tol=1e-6, abs_tol=1e-6):
+        return np.full(sample_count, start, dtype=float)
+    return np.linspace(start, end, sample_count)
+
+
+def _scaled_scene_sample_count(
+    base_samples: int,
+    span_frames: int,
+    fps: float,
+    interval_seconds: float,
+    min_positions: int,
+) -> int:
+    sample_count = max(1, int(base_samples))
+    sample_count = max(sample_count, int(min_positions) if min_positions else 1)
+    if fps > 0 and interval_seconds > 0:
+        span_seconds = span_frames / fps
+        dynamic = int(math.floor(span_seconds / interval_seconds)) + 1
+        sample_count = max(sample_count, dynamic)
+    return sample_count
+
+
+def _probe_video_duration(video_path: Path) -> tuple[Optional[int], Optional[float], Optional[float]]:
+    """Inspect the input video and return (frames, fps, duration_seconds)."""
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None, None, None
+
+    try:
+        frame_count_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps_raw = cap.get(cv2.CAP_PROP_FPS)
+    finally:
+        cap.release()
+
+    frame_count: Optional[int] = None
+    fps: Optional[float] = None
+    duration: Optional[float] = None
+
+    if math.isfinite(frame_count_raw) and frame_count_raw > 0:
+        frame_count = int(frame_count_raw)
+
+    if math.isfinite(fps_raw) and fps_raw > 0:
+        fps = float(fps_raw)
+
+    if frame_count is not None and fps and fps > 0:
+        duration = frame_count / fps
+
+    return frame_count, fps, duration
 
 
 def migrate_nested_harvest(out_root: Path) -> None:
@@ -744,7 +900,8 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Unable to open video: {args.video}")
 
     try:
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_frames_raw = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        total_frames = int(total_frames_raw) if math.isfinite(total_frames_raw) and total_frames_raw > 0 else 0
         if total_frames <= 0:
             LOGGER.warning("Video %s reported zero frame count; seek accuracy may be limited.", args.video)
 
@@ -774,16 +931,19 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         LOGGER.info("Wrote %s with %d scenes.", scenes_csv, len(scenes))
 
         sample_count = max(1, args.scene_samples)
+        fps_raw = cap.get(cv2.CAP_PROP_FPS)
+        fps = float(fps_raw) if math.isfinite(fps_raw) and fps_raw > 0 else 0.0
+
         if args.scene_samples <= 0:
             LOGGER.warning("scene-samples=%d is not positive; defaulting to 1 probe per scene.", args.scene_samples)
 
-        if sample_count == 1:
-            positions = np.array([0.5], dtype=float)
-        else:
-            positions = np.linspace(0.2, 0.8, sample_count)
-
-        frames_to_process: list[tuple[int, int]] = []
+        base_sample_count = max(1, int(args.scene_samples))
+        min_position_count = len(getattr(args, "scene_probes", ()))
+        frames_to_process: list[dict[str, object]] = []
         seen_keys: set[tuple[int, int]] = set()
+        probe_lookup: dict[tuple[int, int], dict[str, object]] = {}
+        scene_probe_plan: dict[int, dict[str, object]] = {}
+
         for scene_idx, (start_frame, end_frame) in enumerate(scenes):
             if end_frame < start_frame:
                 LOGGER.warning(
@@ -791,7 +951,30 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                 )
                 continue
             span = max(1, end_frame - start_frame)
-            for pos in positions:
+            sample_count = _scaled_scene_sample_count(
+                base_sample_count,
+                span,
+                fps,
+                float(getattr(args, "scene_probe_interval", 0.0) or 0.0),
+                min_position_count,
+            )
+            positions = _generate_scene_probe_positions(sample_count, getattr(args, "scene_probes", ()))
+            scene_seconds = (span / fps) if fps > 0 else None
+            plan_entry = scene_probe_plan.setdefault(
+                scene_idx,
+                {
+                    "start": int(start_frame),
+                    "end": int(end_frame),
+                    "frames": [],
+                    "positions": [],
+                    "seconds": scene_seconds,
+                    "count": len(positions),
+                },
+            )
+            plan_entry["count"] = len(positions)
+            plan_entry["seconds"] = scene_seconds
+            plan_entry["positions"] = [float(pos) for pos in positions]
+            for probe_idx, pos in enumerate(positions):
                 frame_idx = int(round(start_frame + pos * span))
                 frame_idx = max(start_frame, min(end_frame, frame_idx))
                 if total_frames > 0 and frame_idx >= total_frames:
@@ -800,9 +983,22 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                frames_to_process.append(key)
+                plan_entry.setdefault("frames", []).append(int(frame_idx))
+                probe_info = {
+                    "scene_idx": scene_idx,
+                    "frame_idx": int(frame_idx),
+                    "probe_index": int(probe_idx),
+                    "probe_position": float(pos),
+                    "probe_count": len(positions),
+                    "scene_start": int(start_frame),
+                    "scene_end": int(end_frame),
+                    "scene_span": span,
+                    "scene_seconds": scene_seconds,
+                }
+                frames_to_process.append(probe_info)
+                probe_lookup[key] = probe_info
 
-        frames_to_process.sort(key=lambda item: (item[1], item[0]))
+        frames_to_process.sort(key=lambda item: (item["frame_idx"], item["scene_idx"]))
 
         candidates_csv = out_dir / "candidates.csv"
         candidate_counts: Counter[int] = Counter()
@@ -814,9 +1010,27 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
 
         with candidates_csv.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["scene_idx", "frame_idx", "x1", "y1", "x2", "y2", "conf", "rel_path"])
+            writer.writerow(
+                [
+                    "scene_idx",
+                    "frame_idx",
+                    "probe_index",
+                    "probe_position",
+                    "x1",
+                    "y1",
+                    "x2",
+                    "y2",
+                    "conf",
+                    "rel_path",
+                ]
+            )
 
-            for scene_idx, frame_idx in frames_to_process:
+            selected_records: list[dict[str, object]] = []
+            scene_reason = "scene_probe_auto" if getattr(args, "scene_auto_inferred", False) else "scene_probe_manual"
+
+            for probe in frames_to_process:
+                scene_idx = int(probe["scene_idx"])
+                frame_idx = int(probe["frame_idx"])
                 if frame_idx < 0:
                     continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -863,6 +1077,8 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                         [
                             scene_idx,
                             frame_idx,
+                            int(probe["probe_index"]),
+                            float(probe["probe_position"]),
                             x1,
                             y1,
                             x2,
@@ -873,6 +1089,32 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                     )
                     candidate_counts[scene_idx] += 1
                     total_candidates += 1
+                    probe_meta = probe_lookup.get((scene_idx, frame_idx), probe)
+                    selected_records.append(
+                        {
+                            "track_id": -1,
+                            "byte_track_id": -1,
+                            "frame": frame_idx,
+                            "quality": None,
+                            "sharpness": None,
+                            "frontalness": None,
+                            "area_frac": area_frac,
+                            "picked": True,
+                            "reason": scene_reason,
+                            "path": rel_record_path.as_posix(),
+                            "association_iou": None,
+                            "match_mode": None,
+                            "frame_offset": None,
+                            "identity_cosine": None,
+                            "similarity_to_centroid": None,
+                            "provider": "scene_probe",
+                            "scene_idx": scene_idx,
+                            "scene_probe_index": int(probe_meta.get("probe_index", probe["probe_index"])),
+                            "scene_probe_position": float(probe_meta.get("probe_position", probe["probe_position"])),
+                            "scene_probe_count": int(probe_meta.get("probe_count", len(getattr(args, "scene_probes", ())))),
+                            "scene_probe_auto": bool(getattr(args, "scene_auto_inferred", False)),
+                        }
+                    )
                     if args.cluster_preview:
                         preview_records.append(
                             {
@@ -880,8 +1122,52 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                                 "frame_idx": frame_idx,
                                 "rel_path": rel_record_path.as_posix(),
                                 "abs_path": crop_path,
+                                "probe_index": int(probe_meta.get("probe_index", probe["probe_index"])),
                             }
                         )
+
+        selected_csv = out_dir / "selected_samples.csv"
+        backup_csv: Optional[Path] = None
+        if selected_csv.exists():
+            backup_csv = out_dir / "selected_samples.scene_probe_backup.csv"
+            try:
+                selected_csv.rename(backup_csv)
+                LOGGER.warning(
+                    "Existing selected_samples.csv moved to %s before writing scene probe summary.",
+                    backup_csv,
+                )
+            except OSError as exc:
+                LOGGER.warning("Failed to rotate previous selected_samples.csv: %s", exc)
+
+        fieldnames = [
+            "track_id",
+            "byte_track_id",
+            "frame",
+            "quality",
+            "sharpness",
+            "frontalness",
+            "area_frac",
+            "picked",
+            "reason",
+            "path",
+            "association_iou",
+            "match_mode",
+            "frame_offset",
+            "identity_cosine",
+            "similarity_to_centroid",
+            "provider",
+            "scene_idx",
+            "scene_probe_index",
+            "scene_probe_position",
+            "scene_probe_count",
+            "scene_probe_auto",
+        ]
+
+        with selected_csv.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            if selected_records:
+                writer.writerows(selected_records)
 
         scene_count = len(scenes)
         LOGGER.info(
@@ -907,6 +1193,18 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
             )
         elif args.cluster_preview:
             LOGGER.warning("Cluster preview requested but no candidate crops were written; skipping clustering.")
+        if scene_probe_plan:
+            for idx, plan in scene_probe_plan.items():
+                LOGGER.debug(
+                    "Scene %d probes frames=%s positions=%s count=%d span_frames=%d span_seconds=%s auto=%s",
+                    idx,
+                    plan.get("frames", []),
+                    [f"{pos:.3f}" for pos in plan.get("positions", [])],
+                    plan.get("count", 0),
+                    int(plan.get("end", 0)) - int(plan.get("start", 0)),
+                    ("{:.2f}".format(plan["seconds"]) if plan.get("seconds") is not None else "unknown"),
+                    bool(getattr(args, "scene_auto_inferred", False)),
+                )
     finally:
         cap.release()
 
@@ -1116,6 +1414,10 @@ def main() -> None:
     args.heartbeat_sec = max(0.1, float(args.heartbeat_sec))
     args._retina_size_override = args.retina_det_size is not None  # type: ignore[attr-defined]
     args._cpu_preset = False  # type: ignore[attr-defined]
+    args.scene_auto_inferred = False  # type: ignore[attr-defined]
+    args.scene_auto_duration = None  # type: ignore[attr-defined]
+    args.scene_auto_frame_count = None  # type: ignore[attr-defined]
+    args.scene_auto_fps = None  # type: ignore[attr-defined]
 
     if args.fast:
         if args.retina_det_size is None:
@@ -1128,6 +1430,41 @@ def main() -> None:
     configure_threads(args.threads)
     args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
     setup_logging()
+
+    scene_pref = getattr(args, "scene_aware", None)
+    autoscale_threshold = float(getattr(args, "scene_autoscale_threshold", 0.0) or 0.0)
+    if scene_pref is None and autoscale_threshold > 0:
+        frame_count, fps, duration = _probe_video_duration(args.video)
+        args.scene_auto_frame_count = frame_count  # type: ignore[attr-defined]
+        args.scene_auto_fps = fps  # type: ignore[attr-defined]
+        args.scene_auto_duration = duration  # type: ignore[attr-defined]
+        if duration is not None and duration <= autoscale_threshold:
+            args.scene_aware = True
+            args.scene_auto_inferred = True  # type: ignore[attr-defined]
+            LOGGER.info(
+                "Auto-enabled scene-aware sampling for %s (duration=%.2fs <= threshold=%.2fs).",
+                args.video,
+                duration,
+                autoscale_threshold,
+            )
+        else:
+            args.scene_aware = False
+            if duration is None:
+                LOGGER.debug(
+                    "Unable to determine duration for %s; scene-aware auto-enable skipped (threshold %.2fs).",
+                    args.video,
+                    autoscale_threshold,
+                )
+            else:
+                LOGGER.debug(
+                    "Duration %.2fs exceeds scene-aware threshold %.2fs; using standard harvest.",
+                    duration,
+                    autoscale_threshold,
+                )
+    elif scene_pref is not None:
+        args.scene_aware = bool(scene_pref)
+    else:
+        args.scene_aware = False
 
     if args.scene_aware:
         run_scene_aware_harvest(args)
