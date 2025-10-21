@@ -1018,7 +1018,12 @@ class HarvestRunner:
         return (nx1, ny1, nx2, ny2)
 
     def _compute_sharpness(self, aligned: np.ndarray) -> float:
-        gray = cv2.cvtColor(aligned, cv2.COLOR_RGB2GRAY)
+        if aligned.ndim == 2:
+            gray = aligned
+        elif aligned.ndim == 3 and aligned.shape[2] == 1:
+            gray = aligned[:, :, 0]
+        else:
+            gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
         variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         return variance
 
