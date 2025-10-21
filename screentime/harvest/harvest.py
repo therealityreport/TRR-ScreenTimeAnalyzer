@@ -274,16 +274,34 @@ class HarvestRunner:
         self.config = config
         # ArcFace embedder for identity consistency checks (lazy)
         self.embedder = embedder
+        self.identity_guard_degraded = False
+
+    def _ensure_embedder(self) -> None:
+        """Initialize the ArcFace embedder if identity guard is enabled."""
+
+        if not self.config.identity_guard or self.embedder is not None:
+            return
+
+        try:
+            self.embedder = ArcFaceEmbedder(threads=self.config.threads)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.warning(
+                "ArcFace embedder initialization failed (%s); disabling identity_guard and identity_split for this run.",
+                exc,
+            )
+            LOGGER.debug("ArcFace embedder initialization stack trace", exc_info=True)
+            self.config.identity_guard = False
+            self.config.identity_split = False
+            self.identity_guard_degraded = True
+            self.embedder = None
+
+            LOGGER.warning(
+                "Identity purity checks are running in degraded mode; downstream consumers should treat harvested identities as unchecked."
+            )
 
     def run(self, video_path: Path, output_root: Path, *, legacy_layout: bool = True) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
-        if self.config.identity_guard and self.embedder is None:
-            try:
-                self.embedder = ArcFaceEmbedder(threads=self.config.threads)
-            except Exception as exc:  # pragma: no cover - runtime guard
-                raise RuntimeError(
-                    "ArcFace embedder unavailable; identity_guard requires embeddings to run"
-                ) from exc
+        self._ensure_embedder()
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video {video_path}")
@@ -1211,6 +1229,8 @@ class HarvestRunner:
                 "reject_counts": dict(reject_counter),
                 "frame_events": {str(frame): events for frame, events in frame_events.items()},
             }
+            if self.identity_guard_degraded:
+                payload["identity_guard_degraded"] = True
             if debug_records:
                 payload["reject_details"] = {k: v for k, v in debug_records.items()}
             if split_events:
