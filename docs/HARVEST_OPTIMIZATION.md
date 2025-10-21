@@ -137,6 +137,8 @@ When running diagnostics, you'll see these rejection reasons:
 | `rejected_frontalness` | Face is too profile/side-view | Lower `min_frontalness` |
 | `rejected_sharpness` | Face is too blurry | Lower `min_sharpness_laplacian` or `sharpness_pctile` |
 
+> **Note:** Sharpness is computed from BGR frames by converting them to grayscale with OpenCV. If you preprocess frames yourself, be sure to keep them in BGR order (OpenCV's default) or convert back before running harvest diagnostics to avoid under-estimating sharpness.
+
 ## Interpreting Results
 
 ### Good Harvest Metrics

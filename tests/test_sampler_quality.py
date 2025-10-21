@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from screentime.harvest.harvest import HarvestConfig, HarvestRunner, TrackSamplingState
 from screentime.types import FaceSample
 
@@ -67,6 +70,24 @@ def test_threshold_rejects_small_area_and_blur():
     sharpness_bad = 80.0
     assert runner._passes_sharpness_threshold(sharpness_good)
     assert not runner._passes_sharpness_threshold(sharpness_bad)
+
+
+def test_bgr_sharpness_threshold_now_passes():
+    runner = build_runner()
+    runner.config.min_sharpness_laplacian = 10_000.0
+
+    aligned = np.zeros((8, 8, 3), dtype=np.uint8)
+    aligned[:, ::2] = [0, 0, 255]
+    aligned[:, 1::2] = [0, 0, 0]
+
+    # Previous implementation assumed RGB input and would under-estimate sharpness.
+    old_gray = cv2.cvtColor(aligned, cv2.COLOR_RGB2GRAY)
+    old_sharpness = float(cv2.Laplacian(old_gray, cv2.CV_64F).var())
+    assert old_sharpness < runner.config.min_sharpness_laplacian
+
+    sharpness = runner._compute_sharpness(aligned)
+    assert sharpness > old_sharpness
+    assert runner._passes_sharpness_threshold(sharpness)
 
 
 def test_frontalness_gate_marks_reason():
