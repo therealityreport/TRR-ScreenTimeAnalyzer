@@ -1,21 +1,21 @@
 {
   "labels": [
     "BRANDI",
-    "BRANDI_BACKUP",
-    "BRANDI_REMOVED",
     "EILEEN",
     "KIM",
     "KYLE",
+    "LVP",
+    "RINNA",
     "YOLANDA"
   ],
   "counts": {
-    "BRANDI": 44,
-    "BRANDI_BACKUP": 64,
-    "BRANDI_REMOVED": 16,
-    "EILEEN": 15,
-    "KIM": 61,
-    "KYLE": 2,
-    "YOLANDA": 47
+    "BRANDI": 37,
+    "EILEEN": 37,
+    "KIM": 21,
+    "KYLE": 15,
+    "LVP": 30,
+    "RINNA": 15,
+    "YOLANDA": 35
   },
   "num_labels": 7
 }
