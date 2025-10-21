@@ -1,8 +1,15 @@
 import numpy as np
+import pytest
+
+pytest.importorskip("cv2", reason="OpenCV required for harvest tests", exc_type=ImportError)
 
 from screentime.attribution.aggregate import tracks_to_segments
 from screentime.attribution.associate import finalize_track_subtracks
-from screentime.harvest.harvest import HarvestConfig
+from screentime.harvest.harvest import (
+    GuardStats,
+    HarvestConfig,
+    _identity_guard_state_update,
+)
 from screentime.recognition.matcher import TrackVotingMatcher
 from screentime.types import FaceSample, ManifestEntry, TrackState, l2_normalize
 
@@ -35,6 +42,73 @@ def test_identity_guard_split_decision_logic():
         sim < cfg.identity_sim_threshold
     )
     assert should_split
+
+
+def test_identity_guard_requires_sustained_drop_for_split():
+    stats = GuardStats()
+    guard_consecutive = 3
+    guard_recovery = 2
+    reject_thresh = 0.35
+    recover_thresh = 0.45
+
+    sims = [0.33, 0.31, 0.50, 0.32, 0.30, 0.29]
+    drop_lengths = []
+    split_triggered = False
+
+    for frame_idx, sim in enumerate(sims):
+        state = _identity_guard_state_update(stats, frame_idx, sim, reject_thresh, recover_thresh)
+        if state == "drop":
+            drop_lengths.append(stats.drop_streak)
+            if stats.drop_streak >= guard_consecutive:
+                split_triggered = True
+                break
+        elif state == "recover" and stats.recovery_streak >= guard_recovery:
+            stats.finalize_recovery()
+            stats.reset_drop()
+
+    assert drop_lengths[0] == 1
+    assert drop_lengths[1] == 2
+    # Single recovery frame should not clear the streak
+    assert stats.drop_streak >= 2
+    assert split_triggered, "Expected sustained drop to trigger a split"
+
+
+def test_identity_guard_recovery_clears_after_consecutive_frames():
+    stats = GuardStats()
+    guard_recovery = 2
+    reject_thresh = 0.35
+    recover_thresh = 0.45
+
+    sims = [0.34, 0.33, 0.48, 0.55]
+    for frame_idx, sim in enumerate(sims):
+        state = _identity_guard_state_update(stats, frame_idx, sim, reject_thresh, recover_thresh)
+        if state == "recover" and stats.recovery_streak >= guard_recovery:
+            stats.finalize_recovery()
+            stats.reset_drop()
+
+    assert stats.drop_streak == 0
+    assert stats.last_recovery is not None
+    payload = stats.last_recovery.to_payload("guard_recovery")
+    assert payload["guard_recovery_count"] == guard_recovery
+    assert payload["guard_recovery_min"] >= recover_thresh
+
+
+def test_identity_guard_drop_payload_tracks_stats():
+    stats = GuardStats()
+    reject_thresh = 0.4
+    recover_thresh = 0.5
+
+    sims = [0.35, 0.36, 0.38]
+    for frame_idx, sim in enumerate(sims):
+        state = _identity_guard_state_update(stats, frame_idx, sim, reject_thresh, recover_thresh)
+        assert state == "drop"
+
+    payload = stats.drop.to_payload("guard_drop")
+    assert payload["guard_drop_count"] == len(sims)
+    assert abs(payload["guard_drop_min"] - min(sims)) < 1e-6
+    assert abs(payload["guard_drop_max"] - max(sims)) < 1e-6
+    assert payload["guard_drop_start_frame"] == 0
+    assert payload["guard_drop_last_frame"] == len(sims) - 1
 
 
 def test_manifest_entry_includes_byte_track_id():

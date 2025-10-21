@@ -619,7 +619,9 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
 
     identity_guard_stride = int(pipeline_cfg.get("identity_guard_stride", 6))
     identity_guard_consecutive = int(pipeline_cfg.get("identity_guard_consecutive", 3))
+    identity_guard_recovery = int(pipeline_cfg.get("identity_guard_recovery", 2))
     identity_guard_cosine_reject = float(pipeline_cfg.get("identity_guard_cosine_reject", 0.35))
+    identity_guard_cosine_recover = float(pipeline_cfg.get("identity_guard_cosine_recover", 0.45))
     identity_guard_enabled = _parse_bool_flag(pipeline_cfg.get("identity_guard"), True)
     identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
     if getattr(args, "no_identity_guard", False):
@@ -663,7 +665,9 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         identity_min_picks=identity_min_picks,
         identity_guard_stride=identity_guard_stride,
         identity_guard_consecutive=identity_guard_consecutive,
+        identity_guard_recovery=identity_guard_recovery,
         identity_guard_cosine_reject=identity_guard_cosine_reject,
+        identity_guard_cosine_recover=identity_guard_cosine_recover,
         reindex_harvest_tracks=bool(pipeline_cfg.get("reindex_harvest_tracks", True)),
         fast_mode=args.fast,
         min_track_frames=min_track_frames_value,

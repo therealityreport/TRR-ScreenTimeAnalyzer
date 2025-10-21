@@ -37,7 +37,9 @@ identity_sim_threshold: 0.62
 identity_min_picks: 3
 identity_guard_stride: 6
 identity_guard_consecutive: 3
+identity_guard_recovery: 2
 identity_guard_cosine_reject: 0.35
+identity_guard_cosine_recover: 0.45
 reindex_harvest_tracks: true
 stitch_identities: true
 stitch_sim: 0.45

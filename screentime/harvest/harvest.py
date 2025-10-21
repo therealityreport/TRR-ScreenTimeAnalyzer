@@ -57,7 +57,9 @@ class HarvestConfig:
     identity_min_picks: int = 3
     identity_guard_stride: int = 6
     identity_guard_consecutive: int = 3
+    identity_guard_recovery: int = 2
     identity_guard_cosine_reject: float = 0.35
+    identity_guard_cosine_recover: float = 0.45
     # Reindex harvest folders independent of ByteTrack ids
     reindex_harvest_tracks: bool = True
     fast_mode: bool = False
@@ -257,6 +259,104 @@ class TrackSamplingState:
             }
 
 
+@dataclass
+class GuardWindow:
+    count: int = 0
+    min_sim: float = float("inf")
+    max_sim: float = float("-inf")
+    start_frame: Optional[int] = None
+    last_frame: Optional[int] = None
+
+    def update(self, frame_idx: int, sim: float) -> None:
+        self.count += 1
+        self.min_sim = min(self.min_sim, float(sim))
+        self.max_sim = max(self.max_sim, float(sim))
+        if self.start_frame is None:
+            self.start_frame = int(frame_idx)
+        self.last_frame = int(frame_idx)
+
+    def reset(self) -> None:
+        self.count = 0
+        self.min_sim = float("inf")
+        self.max_sim = float("-inf")
+        self.start_frame = None
+        self.last_frame = None
+
+    def to_payload(self, prefix: str) -> Dict[str, Any]:
+        if self.count <= 0:
+            return {}
+        payload: Dict[str, Any] = {f"{prefix}_count": int(self.count)}
+        if self.min_sim != float("inf"):
+            payload[f"{prefix}_min"] = float(self.min_sim)
+        if self.max_sim != float("-inf"):
+            payload[f"{prefix}_max"] = float(self.max_sim)
+        if self.start_frame is not None:
+            payload[f"{prefix}_start_frame"] = int(self.start_frame)
+        if self.last_frame is not None:
+            payload[f"{prefix}_last_frame"] = int(self.last_frame)
+        return payload
+
+    def copy(self) -> "GuardWindow":
+        return GuardWindow(
+            count=self.count,
+            min_sim=self.min_sim,
+            max_sim=self.max_sim,
+            start_frame=self.start_frame,
+            last_frame=self.last_frame,
+        )
+
+
+@dataclass
+class GuardStats:
+    drop_streak: int = 0
+    recovery_streak: int = 0
+    drop: GuardWindow = field(default_factory=GuardWindow)
+    active_recovery: GuardWindow = field(default_factory=GuardWindow)
+    last_recovery: Optional[GuardWindow] = None
+
+    def record_drop(self, frame_idx: int, sim: float) -> None:
+        self.drop_streak += 1
+        self.drop.update(frame_idx, sim)
+        self.recovery_streak = 0
+        self.active_recovery.reset()
+
+    def record_recovery(self, frame_idx: int, sim: float) -> None:
+        self.recovery_streak += 1
+        self.active_recovery.update(frame_idx, sim)
+
+    def reset_drop(self) -> None:
+        self.drop_streak = 0
+        self.drop.reset()
+
+    def reset_recovery_progress(self) -> None:
+        self.recovery_streak = 0
+        self.active_recovery.reset()
+
+    def finalize_recovery(self) -> None:
+        if self.active_recovery.count > 0:
+            self.last_recovery = self.active_recovery.copy()
+        else:
+            self.last_recovery = None
+        self.reset_recovery_progress()
+
+
+def _identity_guard_state_update(
+    stats: GuardStats,
+    frame_idx: int,
+    sim: float,
+    reject_thresh: float,
+    recover_thresh: float,
+) -> str:
+    if sim < reject_thresh:
+        stats.record_drop(frame_idx, sim)
+        return "drop"
+    if sim >= recover_thresh:
+        stats.record_recovery(frame_idx, sim)
+        return "recover"
+    stats.reset_recovery_progress()
+    return "neutral"
+
+
 class HarvestRunner:
     """High-level pipeline controller for harvesting aligned crops."""
 
@@ -332,11 +432,13 @@ class HarvestRunner:
         guard_count: Dict[int, int] = {}
         split_events: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         guard_pending_samples: Dict[int, List[Tuple[FaceSample, Optional[np.ndarray], Dict[str, Any]]]] = defaultdict(list)
-        guard_streak: Dict[int, int] = defaultdict(int)
+        guard_stats: Dict[int, GuardStats] = defaultdict(GuardStats)
         guard_last_check: Dict[int, int] = {}
         guard_stride = max(1, int(self.config.identity_guard_stride))
         guard_reject_thresh = float(self.config.identity_guard_cosine_reject)
         guard_consecutive = max(1, int(self.config.identity_guard_consecutive))
+        guard_recovery_consecutive = max(1, int(self.config.identity_guard_recovery))
+        guard_recover_thresh = float(self.config.identity_guard_cosine_recover)
 
         def _harvest_dirname(track_id: int, byte_id: Optional[int]) -> str:
             if self.config.reindex_harvest_tracks or byte_id is None:
@@ -964,44 +1066,75 @@ class HarvestRunner:
                             sim = _cosine(embedding, centroid)
                             face_sample.identity_cosine = sim
 
-                        if sim is not None and sim < guard_reject_thresh:
-                            guard_streak[hid] += 1
-                            guard_pending_samples[hid].append((face_sample, event_payload, embedding))
-                            if guard_streak[hid] >= guard_consecutive:
-                                prev_hid = hid
-                                new_hid = _new_harvest_id()
-                                byte_to_harvest[byte_id] = new_hid
-                                harvest_source_byte[new_hid] = byte_id
-                                payload = {
-                                    "event": "identity_split",
-                                    "track_id": new_hid,
-                                    "byte_track_id": byte_id,
-                                    "prev_harvest_id": prev_hid,
-                                    "cosine_sim": float(sim),
-                                }
-                                log_frame_event(frame_idx, payload)
-                                split_events[byte_id].append({"frame": frame_idx, **payload})
-                                pending_items = guard_pending_samples.pop(prev_hid, [])
-                                guard_streak[prev_hid] = 0
-                                guard_streak[new_hid] = 0
-                                for pending_sample, pending_payload, pending_embed in pending_items:
-                                    pending_sample.track_id = new_hid
-                                    pending_sample.byte_track_id = byte_id
-                                    pending_payload = dict(pending_payload)
-                                    pending_payload["identity_cosine"] = pending_sample.identity_cosine
-                                    _commit_candidate(pending_sample, pending_embed, pending_payload)
-                                continue
+                        if sim is not None:
+                            stats = guard_stats[hid]
+                            state = _identity_guard_state_update(
+                                stats,
+                                frame_idx,
+                                sim,
+                                guard_reject_thresh,
+                                guard_recover_thresh,
+                            )
+                            if state == "drop":
+                                guard_pending_samples[hid].append((face_sample, event_payload, embedding))
+                                if stats.drop_streak >= guard_consecutive:
+                                    prev_hid = hid
+                                    new_hid = _new_harvest_id()
+                                    byte_to_harvest[byte_id] = new_hid
+                                    harvest_source_byte[new_hid] = byte_id
+                                    drop_payload = stats.drop.to_payload("guard_drop")
+                                    recovery_window = stats.last_recovery
+                                    recovery_payload = (
+                                        recovery_window.to_payload("guard_recovery")
+                                        if recovery_window is not None
+                                        else {}
+                                    )
+                                    payload = {
+                                        "event": "identity_split",
+                                        "track_id": new_hid,
+                                        "byte_track_id": byte_id,
+                                        "prev_harvest_id": prev_hid,
+                                        "cosine_sim": float(sim),
+                                        **drop_payload,
+                                        **recovery_payload,
+                                    }
+                                    log_frame_event(frame_idx, payload)
+                                    split_events[byte_id].append({"frame": frame_idx, **payload})
+                                    pending_items = guard_pending_samples.pop(prev_hid, [])
+                                    guard_stats.pop(prev_hid, None)
+                                    guard_last_check.pop(prev_hid, None)
+                                    guard_stats[new_hid]
+                                    guard_last_check[new_hid] = frame_idx
+                                    for pending_sample, pending_payload, pending_embed in pending_items:
+                                        pending_sample.track_id = new_hid
+                                        pending_sample.byte_track_id = byte_id
+                                        pending_payload = dict(pending_payload)
+                                        pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                                        _commit_candidate(pending_sample, pending_embed, pending_payload)
+                                    continue
+                                else:
+                                    continue
+                            elif state == "recover":
+                                if stats.recovery_streak >= guard_recovery_consecutive:
+                                    stats.finalize_recovery()
+                                    stats.reset_drop()
+                                    pending_items = guard_pending_samples.pop(hid, [])
+                                    for pending_sample, pending_payload, pending_embed in pending_items:
+                                        pending_payload = dict(pending_payload)
+                                        pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                                        _commit_candidate(pending_sample, pending_embed, pending_payload)
                             else:
-                                continue
-                        else:
-                            guard_streak[hid] = 0
-                            pending_items = guard_pending_samples.pop(hid, [])
-                            for pending_sample, pending_payload, pending_embed in pending_items:
-                                pending_payload = dict(pending_payload)
-                                pending_payload["identity_cosine"] = pending_sample.identity_cosine
-                                _commit_candidate(pending_sample, pending_embed, pending_payload)
+                                if stats.drop_streak == 0:
+                                    pending_items = guard_pending_samples.pop(hid, [])
+                                    for pending_sample, pending_payload, pending_embed in pending_items:
+                                        pending_payload = dict(pending_payload)
+                                        pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                                        _commit_candidate(pending_sample, pending_embed, pending_payload)
                 if not guard_checked:
-                    guard_streak[hid] = 0
+                    stats = guard_stats.get(hid)
+                    if stats is not None:
+                        stats.reset_drop()
+                        stats.reset_recovery_progress()
                     pending_items = guard_pending_samples.pop(hid, [])
                     for pending_sample, pending_payload, pending_embed in pending_items:
                         pending_payload = dict(pending_payload)
@@ -1026,6 +1159,14 @@ class HarvestRunner:
                     byte_to_harvest[byte_id] = hid
                     harvest_source_byte[hid] = byte_id
                     face_sample.track_id = hid
+                    prev_stats = guard_stats.pop(prev_hid, GuardStats())
+                    drop_payload = prev_stats.drop.to_payload("guard_drop")
+                    recovery_window = prev_stats.last_recovery
+                    recovery_payload = (
+                        recovery_window.to_payload("guard_recovery")
+                        if recovery_window is not None
+                        else {}
+                    )
                     guard_centroid[hid] = embedding.copy()
                     guard_count[hid] = 1
                     payload = {
@@ -1034,9 +1175,21 @@ class HarvestRunner:
                         "byte_track_id": byte_id,
                         "prev_harvest_id": prev_hid,
                         "cosine_sim": float(sim),
+                        **drop_payload,
+                        **recovery_payload,
                     }
+                    guard_stats[hid]
+                    guard_last_check.pop(prev_hid, None)
+                    guard_last_check[hid] = frame_idx
+                    pending_items = guard_pending_samples.pop(prev_hid, [])
                     log_frame_event(frame_idx, payload)
                     split_events[byte_id].append({"frame": frame_idx, **payload})
+                    for pending_sample, pending_payload, pending_embed in pending_items:
+                        pending_sample.track_id = hid
+                        pending_sample.byte_track_id = byte_id
+                        pending_payload = dict(pending_payload)
+                        pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                        _commit_candidate(pending_sample, pending_embed, pending_payload)
                 else:
                     face_sample.track_id = hid
 
