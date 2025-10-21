@@ -115,6 +115,52 @@ def _resolve_min_frontalness(args: argparse.Namespace, pipeline_cfg: dict, legac
     return float(legacy_default)
 
 
+class _TrackExplicitInt(argparse.Action):
+    """Argparse action that records when a numeric value was explicitly provided."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        try:
+            value = int(values)
+        except (TypeError, ValueError):
+            parser.error(f"{option_string} expects an integer value")
+        setattr(namespace, self.dest, value)
+        setattr(namespace, f"_{self.dest}_explicit", True)
+
+
+def _compute_scene_positions(sample_count: int, custom: Optional[Sequence[float]] = None) -> np.ndarray:
+    """Resolve normalized probe positions for scene-aware sampling."""
+
+    if custom:
+        positions = []
+        for pos in custom:
+            try:
+                positions.append(float(pos))
+            except (TypeError, ValueError):
+                continue
+        if positions:
+            clamped = [min(0.99, max(0.0, p)) for p in positions]
+            return np.array(sorted(clamped), dtype=float)
+
+    count = max(1, int(sample_count))
+    if count == 1:
+        return np.array([0.5], dtype=float)
+    if count == 2:
+        return np.array([0.1, 0.9], dtype=float)
+
+    base = [0.05, 0.5, 0.95]
+    if count <= 3:
+        return np.array(base[:count], dtype=float)
+
+    remaining = count - len(base)
+    if remaining > 0:
+        interior = np.linspace(0.2, 0.8, remaining + 2)[1:-1]
+        positions = base + interior.tolist()
+    else:
+        positions = base
+    positions = positions[:count]
+    return np.array(sorted(positions), dtype=float)
+
+
 def configure_threads(thread_count: int) -> None:
     """Limit math library thread usage to manage thermals."""
     threads = _normalize_threads(thread_count)
@@ -155,6 +201,7 @@ def build_session_options(thread_count: int):
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
+    parser.set_defaults(scene_aware=None)
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
         "--harvest-dir",
@@ -269,6 +316,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Maximum number of new tracks to confirm per second (default 2).",
     )
     parser.add_argument(
+        "--track-buffer",
+        type=int,
+        default=None,
+        help="Override ByteTrack track_buffer size in frames (default from tracker config).",
+    )
+    parser.add_argument(
         "--stitch-identities",
         type=lambda value: bool(strtobool(value)),
         default=None,
@@ -377,8 +430,26 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scene-aware",
+        dest="scene_aware",
         action="store_true",
         help="Use scene/shot detection and sample a few frames per scene.",
+    )
+    parser.add_argument(
+        "--no-scene-aware",
+        dest="scene_aware",
+        action="store_false",
+        help="Force disable scene-aware sampling even when auto-detection would enable it.",
+    )
+    parser.add_argument(
+        "--no-auto-scene-aware",
+        action="store_true",
+        help="Disable automatic scene-aware activation for short clips.",
+    )
+    parser.add_argument(
+        "--scene-auto-threshold-sec",
+        type=float,
+        default=300.0,
+        help="Automatically enable scene-aware mode when clip duration is at or below this threshold (seconds).",
     )
     parser.add_argument("--scene-threshold", type=float, default=27.0, help="Scene detection threshold.")
     parser.add_argument(
@@ -389,9 +460,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scene-samples",
-        type=int,
+        action=_TrackExplicitInt,
         default=3,
         help="How many frames to probe per scene (evenly spaced between 20% and 80%).",
+    )
+    parser.add_argument(
+        "--scene-probe-positions",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Custom normalized positions (0-1) for scene-aware probes; overrides the default staggered pattern.",
     )
     parser.add_argument(
         "--min-face-frac",
@@ -439,6 +517,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         dest="recall_pass",
         action="store_false",
         help="Disable the relaxed recall pass.",
+    )
+    parser.add_argument(
+        "--recall-det-thresh",
+        type=float,
+        default=None,
+        help="Override detection confidence threshold for recall candidates (default 0.20).",
+    )
+    parser.add_argument(
+        "--recall-face-iou",
+        type=float,
+        default=None,
+        help="Override minimum face-to-track IoU required for recall promotion.",
+    )
+    parser.add_argument(
+        "--recall-track-iou",
+        type=float,
+        default=None,
+        help="Override minimum dilated track IoU required for recall promotion.",
     )
     return parser.parse_args(argv)
 
@@ -530,6 +626,31 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     tracker_cfg = load_yaml(args.tracker_config)
     cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
 
+    fps_hint = float(getattr(args, "_video_fps", 0.0) or 0.0)
+    auto_scene = bool(getattr(args, "_auto_scene_enabled", False))
+
+    track_buffer_cfg = tracker_cfg.get("track_buffer")
+    track_buffer_val = None
+    if args.track_buffer is not None:
+        track_buffer_val = max(1, int(args.track_buffer))
+        tracker_cfg["track_buffer"] = track_buffer_val
+        LOGGER.info("Applying CLI track_buffer override: %d", track_buffer_val)
+    elif fps_hint > 0:
+        base_buffer = int(track_buffer_cfg) if isinstance(track_buffer_cfg, (int, float)) else 30
+        buffer_seconds = float(pipeline_cfg.get("track_buffer_seconds", 1.0))
+        adaptive_buffer = max(base_buffer, int(math.ceil(fps_hint * buffer_seconds)))
+        if adaptive_buffer > base_buffer:
+            tracker_cfg["track_buffer"] = adaptive_buffer
+            track_buffer_val = adaptive_buffer
+            LOGGER.info(
+                "Scaling track_buffer to %d based on %.2ffps clip (window %.2fs).",
+                adaptive_buffer,
+                fps_hint,
+                buffer_seconds,
+            )
+    if track_buffer_val is None and isinstance(track_buffer_cfg, (int, float)):
+        track_buffer_val = int(track_buffer_cfg)
+
     video_stem = infer_video_stem(args.video)
     legacy_layout = args.harvest_dir is None
     if args.harvest_dir is not None:
@@ -592,6 +713,8 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
     min_frontalness = _resolve_min_frontalness(args, pipeline_cfg)
+    profile_quota = int(pipeline_cfg.get("profile_quota", 0))
+    profile_min_frontal = float(pipeline_cfg.get("profile_min_frontalness", 0.0))
     sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
     if sharpness_pctile is None:
         legacy_pct = pipeline_cfg.get("min_sharpness_pct")
@@ -622,8 +745,21 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     new_track_min_frames = int(new_track_min_frames)
 
     max_new_tracks_per_sec = args.max_new_tracks_per_sec
+    max_tracks_from_cfg = "max_new_tracks_per_sec" in pipeline_cfg
     if max_new_tracks_per_sec is None:
         max_new_tracks_per_sec = pipeline_cfg.get("max_new_tracks_per_sec", 2.0)
+        if not max_tracks_from_cfg and fps_hint > 0:
+            adaptive = max(2.0, round(fps_hint / 12.0, 2))
+            if auto_scene:
+                adaptive = max(adaptive, round(fps_hint / 8.0, 2))
+            if adaptive > float(max_new_tracks_per_sec):
+                LOGGER.info(
+                    "Scaling max_new_tracks_per_sec to %.2f for %.2ffps clip (auto_scene=%s).",
+                    adaptive,
+                    fps_hint,
+                    auto_scene,
+                )
+                max_new_tracks_per_sec = adaptive
     max_new_tracks_per_sec = float(max_new_tracks_per_sec)
 
     pipeline_stitch_default = _parse_bool_flag(pipeline_cfg.get("stitch_identities"), True)
@@ -636,9 +772,26 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     stitch_gap_ms = float(stitch_gap_ms)
     stitch_min_iou = float(stitch_min_iou)
 
+    recall_det_thresh = args.recall_det_thresh
+    if recall_det_thresh is None:
+        recall_det_thresh = pipeline_cfg.get("recall_det_thresh", 0.20)
+    recall_face_iou = args.recall_face_iou
+    if recall_face_iou is None:
+        recall_face_iou = pipeline_cfg.get("recall_face_iou", 0.15)
+    recall_track_iou = args.recall_track_iou
+    if recall_track_iou is None:
+        recall_track_iou = pipeline_cfg.get("recall_track_iou", 0.30)
+    recall_det_thresh = float(recall_det_thresh)
+    recall_face_iou = float(recall_face_iou)
+    recall_track_iou = float(recall_track_iou)
+
     identity_guard_stride = int(pipeline_cfg.get("identity_guard_stride", 6))
     identity_guard_consecutive = int(pipeline_cfg.get("identity_guard_consecutive", 3))
     identity_guard_cosine_reject = float(pipeline_cfg.get("identity_guard_cosine_reject", 0.35))
+    identity_guard_recovery = int(pipeline_cfg.get("identity_guard_recovery", HarvestConfig.identity_guard_recovery))
+    identity_guard_recover_margin = float(
+        pipeline_cfg.get("identity_guard_recover_margin", HarvestConfig.identity_guard_recover_margin)
+    )
     identity_guard_enabled = _parse_bool_flag(pipeline_cfg.get("identity_guard"), True)
     identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
     if getattr(args, "no_identity_guard", False):
@@ -669,11 +822,15 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
         allow_face_center=bool(pipeline_cfg.get("allow_face_center", False)),
         dilate_track_px=dilate_track_px,
         temporal_iou_tolerance=temporal_iou_tolerance,
-        profile_asymmetry_thresh=pipeline_cfg.get("profile_asymmetry_thresh", 0.25),
+        profile_asymmetry_thresh=float(
+            pipeline_cfg.get("profile_asymmetry_thresh", HarvestConfig.profile_asymmetry_thresh)
+        ),
+        profile_quota=profile_quota,
+        profile_min_frontalness=profile_min_frontal,
         quality_weights=quality_weights,
         target_area_frac=target_area_frac,
-        debug_rejections=pipeline_cfg.get("debug_rejections", False),
-        multi_face_per_track_guard=pipeline_cfg.get("multi_face_per_track_guard", True),
+        debug_rejections=bool(pipeline_cfg.get("debug_rejections", False)),
+        multi_face_per_track_guard=bool(pipeline_cfg.get("multi_face_per_track_guard", True)),
         multi_face_tiebreak=pipeline_cfg.get("multi_face_tiebreak", "quality"),
         fallback_head_pct=float(pipeline_cfg.get("fallback_head_pct", 0.4)),
         identity_guard=identity_guard_enabled,
@@ -683,15 +840,17 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
         identity_guard_stride=identity_guard_stride,
         identity_guard_consecutive=identity_guard_consecutive,
         identity_guard_cosine_reject=identity_guard_cosine_reject,
+        identity_guard_recovery=identity_guard_recovery,
+        identity_guard_recover_margin=identity_guard_recover_margin,
         reindex_harvest_tracks=bool(pipeline_cfg.get("reindex_harvest_tracks", True)),
         fast_mode=args.fast,
         min_track_frames=min_track_frames_value,
         write_candidates=bool(args.write_candidates),
         recall_pass=bool(args.recall_pass),
-        recall_det_thresh=0.20,
-        recall_face_iou=float(pipeline_cfg.get("recall_face_iou", 0.15)),
-        recall_track_iou=float(pipeline_cfg.get("recall_track_iou", 0.30)),
-        recall_max_gap=int(pipeline_cfg.get("recall_max_gap", 4)),
+        recall_det_thresh=recall_det_thresh,
+        recall_face_iou=recall_face_iou,
+        recall_track_iou=recall_track_iou,
+        recall_max_gap=int(pipeline_cfg.get("recall_max_gap", HarvestConfig.recall_max_gap)),
         progress_percent_interval=float(args.progress_interval),
         progress_fallback_frames=progress_fallback_frames,
         heartbeat_seconds=float(args.heartbeat_sec),
@@ -801,10 +960,17 @@ def run_scene_aware_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCap
         if args.scene_samples <= 0:
             LOGGER.warning("scene-samples=%d is not positive; defaulting to 1 probe per scene.", args.scene_samples)
 
-        if sample_count == 1:
-            positions = np.array([0.5], dtype=float)
-        else:
-            positions = np.linspace(0.2, 0.8, sample_count)
+        if getattr(args, "_auto_scene_enabled", False) and not getattr(args, "_scene_samples_explicit", False):
+            base = sample_count
+            sample_count = max(sample_count, 5)
+            if sample_count != base:
+                LOGGER.info(
+                    "Auto scene-aware: increasing probes per scene from %d to %d for richer coverage.",
+                    base,
+                    sample_count,
+                )
+
+        positions = _compute_scene_positions(sample_count, args.scene_probe_positions)
 
         frames_to_process: list[tuple[int, int]] = []
         seen_keys: set[tuple[int, int]] = set()
@@ -1146,13 +1312,37 @@ def main() -> None:
     if not cap.isOpened():
         raise SystemExit(f"Unable to open video: {args.video}")
 
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_sec = 0.0
+    if fps > 0 and total_frames > 0:
+        duration_sec = total_frames / fps
+
+    args._video_fps = fps  # type: ignore[attr-defined]
+    args._video_frame_count = total_frames  # type: ignore[attr-defined]
+    args._video_duration_sec = duration_sec if duration_sec > 0 else None  # type: ignore[attr-defined]
+
+    auto_scene_enabled = False
+    if args.scene_aware is None:
+        enable_auto = not getattr(args, "no_auto_scene_aware", False)
+        if enable_auto and duration_sec > 0 and duration_sec <= float(args.scene_auto_threshold_sec):
+            args.scene_aware = True
+            auto_scene_enabled = True
+            LOGGER.info(
+                "Auto-enabling scene-aware harvest for %.1fs clip (threshold %.1fs).",
+                duration_sec,
+                float(args.scene_auto_threshold_sec),
+            )
+        else:
+            args.scene_aware = False
+    setattr(args, "_auto_scene_enabled", auto_scene_enabled)
+
     samples_per_sec = args.samples_per_sec
     try:
         target_samples = None if samples_per_sec is None else float(samples_per_sec)
     except (TypeError, ValueError):
         target_samples = None
     if target_samples is not None and target_samples > 0:
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if fps > 0.0 and getattr(args, "stride", None) is None:
             args.stride = max(1, int(math.ceil(fps / target_samples)))
 
