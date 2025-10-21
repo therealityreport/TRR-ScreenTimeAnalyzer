@@ -89,15 +89,21 @@ def load_assignments_cached(log_path: str):
 
 @st.cache_data(show_spinner=False)
 def list_person_labels(facebank_dir: str) -> List[str]:
-@st.cache_data(show_spinner=False)
-def load_clusters_cached(harvest_path: str):
-    return data_lib.load_clusters(Path(harvest_path))
-
-
     root = Path(facebank_dir)
     if not root.exists():
         return []
-    return sorted([p.name for p in root.iterdir() if p.is_dir()])
+
+    labels: List[str] = []
+    for path in root.iterdir():
+        if path.is_dir():
+            labels.append(path.name)
+
+    return sorted(labels)
+
+
+@st.cache_data(show_spinner=False)
+def load_clusters_cached(harvest_path: str):
+    return data_lib.load_clusters(Path(harvest_path))
 
 
 @st.cache_resource(show_spinner=False)
