@@ -74,7 +74,7 @@ class HarvestConfig:
     threads: int = 1
     min_track_frames: int = 12
     new_track_min_frames: int = 3
-    max_new_tracks_per_sec: float = 2.0
+    max_new_tracks_per_sec: Optional[float] = None
     stitch_identities: bool = True
     stitch_sim: float = 0.45
     stitch_gap_ms: float = 8000.0
@@ -274,6 +274,108 @@ class HarvestRunner:
         self.config = config
         # ArcFace embedder for identity consistency checks (lazy)
         self.embedder = embedder
+        self.last_run_stats: Dict[str, Any] = {}
+        self._effective_max_new_tracks_per_sec: Optional[float] = None
+
+    def _tracker_settings_snapshot(self) -> Dict[str, float]:
+        defaults = {"track_buffer": 30.0, "new_track_thresh": 0.6}
+        describe = getattr(self.tracker, "describe_settings", None)
+        snapshot: Dict[str, Any] = {}
+        if callable(describe):
+            try:
+                snapshot = dict(describe())
+            except Exception:  # pragma: no cover - defensive logging suppressed
+                snapshot = {}
+        result: Dict[str, float] = {}
+        for key, default in defaults.items():
+            value = snapshot.get(key)
+            if value is None:
+                result[key] = float(default)
+            else:
+                try:
+                    result[key] = float(value)
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    result[key] = float(default)
+        if "match_thresh" in snapshot and snapshot["match_thresh"] is not None:
+            try:
+                result["match_thresh"] = float(snapshot["match_thresh"])
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                pass
+        return result
+
+    def _estimate_cut_ratio(self, video_path: Path, fps: float, frame_count: int) -> float:
+        sample_cap = cv2.VideoCapture(str(video_path))
+        if not sample_cap.isOpened():
+            return 0.0
+        approx_window = int(max(30, min(240, (fps * 6) if fps > 0 else 180)))
+        if frame_count:
+            sample_limit = min(frame_count, approx_window)
+        else:
+            sample_limit = approx_window
+        prev_gray: Optional[np.ndarray] = None
+        cuts = 0
+        transitions = 0
+        for _ in range(sample_limit):
+            ret, frame = sample_cap.read()
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev_gray is not None:
+                diff = cv2.absdiff(gray, prev_gray)
+                if float(np.mean(diff)) > 18.0:
+                    cuts += 1
+                transitions += 1
+            prev_gray = gray
+        sample_cap.release()
+        if transitions == 0:
+            return 0.0
+        return cuts / transitions
+
+    def _auto_tune_tracker(
+        self,
+        fps: float,
+        duration_sec: Optional[float],
+        cut_ratio: float,
+        settings: Dict[str, float],
+    ) -> Dict[str, Any]:
+        adjustments: Dict[str, Any] = {}
+        base_buffer = int(round(settings.get("track_buffer", 30.0)))
+        base_thresh = float(settings.get("new_track_thresh", 0.6))
+        short_clip = duration_sec is not None and duration_sec <= 120.0
+        very_short = duration_sec is not None and duration_sec <= 45.0
+        high_cut = cut_ratio >= 0.25
+        very_high_cut = cut_ratio >= 0.45
+        high_fps = fps >= 50.0
+        if fps <= 0:
+            fps = 30.0
+        if short_clip and (high_cut or high_fps):
+            scale = 2.0
+            if very_high_cut:
+                scale = 3.0
+            elif very_short:
+                scale = max(scale, 2.5)
+            elif high_fps:
+                scale = max(scale, 2.25)
+            desired_buffer = max(base_buffer, int(round(fps * scale)))
+            if desired_buffer > base_buffer:
+                adjustments["track_buffer"] = desired_buffer
+            relax_target = 0.5
+            if very_high_cut:
+                relax_target = 0.45
+            if base_thresh > relax_target:
+                adjustments["new_track_thresh"] = relax_target
+        return adjustments
+
+    def _heuristic_max_new_tracks_per_sec(self, fps: float, cut_ratio: float) -> float:
+        if fps <= 0:
+            return 2.0
+        divisor = 6.0
+        if cut_ratio >= 0.5:
+            divisor = 3.0
+        elif cut_ratio >= 0.3:
+            divisor = 4.0
+        value = fps / divisor
+        return float(max(2.0, min(20.0, value)))
 
     def run(self, video_path: Path, output_root: Path, *, legacy_layout: bool = True) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
@@ -293,7 +395,63 @@ class HarvestRunner:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_area = float(width * height)
+        duration_sec = (frame_count / fps) if frame_count and fps > 0 else None
         self.tracker.set_frame_rate(fps)
+
+        tracker_settings_before = self._tracker_settings_snapshot()
+        cut_ratio = self._estimate_cut_ratio(video_path, fps, frame_count)
+        adjustments = self._auto_tune_tracker(fps, duration_sec, cut_ratio, tracker_settings_before)
+        applied_adjustments: Dict[str, Any] = {}
+        if adjustments and hasattr(self.tracker, "configure"):
+            try:
+                self.tracker.configure(**adjustments)
+                applied_adjustments = adjustments
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("Unable to apply tracker auto-tuning: %s", exc)
+        tracker_settings_after = self._tracker_settings_snapshot()
+
+        max_tracks_auto = self.config.max_new_tracks_per_sec is None
+        if self.config.max_new_tracks_per_sec is None:
+            effective_max_new_tracks = self._heuristic_max_new_tracks_per_sec(fps, cut_ratio)
+        else:
+            effective_max_new_tracks = float(self.config.max_new_tracks_per_sec)
+        self._effective_max_new_tracks_per_sec = effective_max_new_tracks
+
+        auto_labels: List[str] = []
+        if adjustments:
+            auto_labels.append("tracker_auto" + ("_applied" if applied_adjustments else "_requested"))
+        if max_tracks_auto:
+            auto_labels.append("max_tracks_auto")
+        if not auto_labels:
+            auto_labels.append("manual")
+        duration_log = f"{duration_sec:.1f}s" if duration_sec is not None else "unknown"
+        LOGGER.info(
+            "Tracker runtime settings fps=%.2f duration=%s cut_ratio=%.2f track_buffer=%d->%d new_track_thresh=%.2f->%.2f max_new_tracks_per_sec=%.2f (%s)",
+            fps,
+            duration_log,
+            cut_ratio,
+            int(round(tracker_settings_before.get("track_buffer", 0))),
+            int(round(tracker_settings_after.get("track_buffer", 0))),
+            float(tracker_settings_before.get("new_track_thresh", 0.0)),
+            float(tracker_settings_after.get("new_track_thresh", 0.0)),
+            effective_max_new_tracks,
+            ",".join(auto_labels),
+        )
+
+        self.last_run_stats = {
+            "fps": fps,
+            "frame_count": frame_count,
+            "duration_sec": duration_sec,
+            "cut_ratio": cut_ratio,
+            "tracker_settings_before": tracker_settings_before,
+            "tracker_settings": tracker_settings_after,
+            "auto_tracker_tuning": {
+                "requested": adjustments,
+                "applied": applied_adjustments,
+            },
+            "max_new_tracks_per_sec": effective_max_new_tracks,
+            "max_new_tracks_auto": max_tracks_auto,
+        }
 
         output_root = Path(output_root)
         video_stem = infer_video_stem(video_path)

@@ -604,8 +604,9 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
 
     max_new_tracks_per_sec = args.max_new_tracks_per_sec
     if max_new_tracks_per_sec is None:
-        max_new_tracks_per_sec = pipeline_cfg.get("max_new_tracks_per_sec", 2.0)
-    max_new_tracks_per_sec = float(max_new_tracks_per_sec)
+        max_new_tracks_per_sec = pipeline_cfg.get("max_new_tracks_per_sec")
+    if max_new_tracks_per_sec is not None:
+        max_new_tracks_per_sec = float(max_new_tracks_per_sec)
 
     pipeline_stitch_default = _parse_bool_flag(pipeline_cfg.get("stitch_identities"), True)
     stitch_identities = _parse_bool_flag(args.stitch_identities, pipeline_stitch_default)

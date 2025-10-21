@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -47,14 +47,21 @@ class ByteTrackWrapper:
                     self.track_low_thresh = track_low_thresh
                     self.new_track_thresh = new_track_thresh
 
-            self.tracker = BYTETracker(_Args(), frame_rate=30)
+            args = _Args()
+            self.tracker = BYTETracker(args, frame_rate=30)
             self._fallback = False
             self._track_buffer = track_buffer
+            self._new_track_thresh = new_track_thresh
+            self._match_thresh = match_thresh
+            self._args = args
         except Exception as exc:  # pragma: no cover - import guard
             LOGGER.warning("Falling back to simple IOU tracker: %s", exc)
             self.tracker = _SimpleTracker(track_buffer=track_buffer)
             self._fallback = True
             self._track_buffer = track_buffer
+            self._new_track_thresh = new_track_thresh
+            self._match_thresh = match_thresh
+            self._args = None
         LOGGER.info(
             "Initialised ByteTrackWrapper track_buffer=%s match_thresh=%.2f conf_thres=%.2f",
             track_buffer,
@@ -68,6 +75,47 @@ class ByteTrackWrapper:
             return
         if hasattr(self.tracker, "frame_rate"):
             self.tracker.frame_rate = fps
+
+    def configure(
+        self,
+        *,
+        track_buffer: Optional[int] = None,
+        new_track_thresh: Optional[float] = None,
+    ) -> None:
+        """Update runtime tracking parameters."""
+
+        if track_buffer is not None:
+            self._track_buffer = int(track_buffer)
+            if hasattr(self.tracker, "track_buffer"):
+                try:
+                    self.tracker.track_buffer = int(track_buffer)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if hasattr(self.tracker, "max_time_lost"):
+                try:
+                    self.tracker.max_time_lost = int(track_buffer)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if self._args is not None and hasattr(self._args, "track_buffer"):
+                self._args.track_buffer = int(track_buffer)
+        if new_track_thresh is not None:
+            self._new_track_thresh = float(new_track_thresh)
+            if hasattr(self.tracker, "new_track_thresh"):
+                try:
+                    self.tracker.new_track_thresh = float(new_track_thresh)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if self._args is not None and hasattr(self._args, "new_track_thresh"):
+                self._args.new_track_thresh = float(new_track_thresh)
+
+    def describe_settings(self) -> Dict[str, float]:
+        """Return the active tracker parameters for logging/debugging."""
+
+        return {
+            "track_buffer": float(self._track_buffer),
+            "new_track_thresh": float(self._new_track_thresh),
+            "match_thresh": float(self._match_thresh),
+        }
 
     def _detections_to_numpy(self, detections: Sequence[Detection]) -> np.ndarray:
         rows = []
