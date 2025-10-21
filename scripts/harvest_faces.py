@@ -12,7 +12,7 @@ from collections import Counter
 import shutil
 from distutils.util import strtobool
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import cv2
 import numpy as np
@@ -28,6 +28,35 @@ from screentime.tracking.bytetrack_wrap import ByteTrackWrapper
 
 
 LOGGER = logging.getLogger("scripts.harvest")
+CPU_PROVIDER_NAME = "CPUExecutionProvider"
+
+
+def _providers_cpu_only(providers: Optional[Sequence[str]]) -> bool:
+    if not providers:
+        return True
+    normalized = [str(provider).strip() for provider in providers if provider]
+    if not normalized:
+        return True
+    return all(provider.upper() == CPU_PROVIDER_NAME.upper() for provider in normalized)
+
+
+def _maybe_apply_cpu_preset(args: argparse.Namespace, pipeline_cfg: dict) -> bool:
+    if (
+        _providers_cpu_only(getattr(args, "onnx_providers", None))
+        and not getattr(args, "fast", False)
+        and getattr(args, "stride", None) is None
+        and getattr(args, "retina_det_size", None) is None
+    ):
+        default_stride = pipeline_cfg.get("stride", 1)
+        try:
+            stride_value = int(default_stride)
+        except (TypeError, ValueError):
+            stride_value = 1
+        args.stride = max(2, stride_value)
+        args._cpu_preset = True  # type: ignore[attr-defined]
+        return True
+    args._cpu_preset = False  # type: ignore[attr-defined]
+    return False
 
 
 def _normalize_threads(value: int) -> int:
@@ -125,7 +154,7 @@ def parse_args() -> argparse.Namespace:
         nargs=2,
         default=None,
         metavar=("WIDTH", "HEIGHT"),
-        help="Override RetinaFace detection size",
+        help="Override RetinaFace detection size (CPU preset uses 640x640 when unset).",
     )
     parser.add_argument(
         "--face-det-threshold",
@@ -265,19 +294,24 @@ def parse_args() -> argparse.Namespace:
         "--stride",
         type=int,
         default=None,
-        help="Override base frame stride before harvest sampling.",
+        help="Override base frame stride before harvest sampling (CPU preset uses max(2, pipeline stride)).",
     )
     parser.add_argument(
         "--onnx-providers",
         type=str,
         nargs="+",
         default=None,
-        help="ONNX execution providers (e.g., 'CPUExecutionProvider' or 'CoreMLExecutionProvider CPUExecutionProvider')",
+        help="ONNX execution providers (leave unset or CPUExecutionProvider to trigger CPU preset; e.g., 'CoreMLExecutionProvider CPUExecutionProvider')",
     )
     parser.add_argument(
         "--defer-embeddings",
         action="store_true",
         help="Skip ArcFace embeddings during harvest (compute later in clustering/facebank stages).",
+    )
+    parser.add_argument(
+        "--no-identity-guard",
+        action="store_true",
+        help="Disable identity purity guard and split checks (faster but risks mixing identities).",
     )
     parser.add_argument(
         "--threads",
@@ -450,6 +484,7 @@ def migrate_nested_harvest(out_root: Path) -> None:
 def run_standard_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
+    cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
 
     video_stem = infer_video_stem(args.video)
     legacy_layout = args.harvest_dir is None
@@ -467,13 +502,24 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     ensure_dir(harvest_dir)
     migrate_nested_harvest(harvest_dir)
 
-    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(pipeline_cfg.get("det_size", [960, 960]))
+    det_size_cfg = pipeline_cfg.get("det_size", [960, 960]) or [960, 960]
+    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(det_size_cfg)
     det_thresh_arg = args.det_thresh if args.det_thresh is not None else args.face_det_threshold
     face_conf = float(det_thresh_arg) if det_thresh_arg is not None else 0.30
     person_conf = float(args.person_conf) if args.person_conf is not None else float(pipeline_cfg.get("person_conf_th", 0.20))
 
-    if args.fast and args.retina_det_size is None:
+    if cpu_preset_enabled and args.retina_det_size is None:
         det_size = (640, 640)
+    elif args.fast and args.retina_det_size is None:
+        det_size = (640, 640)
+    if getattr(args, "_cpu_preset", False):
+        stride_for_log = args.stride if args.stride is not None else pipeline_cfg.get("stride", 1)
+        LOGGER.info(
+            "Applying CPU preset: stride=%s, detector=%dx%d. Override with --stride or --retina-det-size.",
+            stride_for_log,
+            det_size[0],
+            det_size[1],
+        )
 
     person_detector = YOLOPersonDetector(
         weights=args.person_weights,
@@ -552,6 +598,12 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     identity_guard_cosine_reject = float(pipeline_cfg.get("identity_guard_cosine_reject", 0.35))
     identity_guard_enabled = _parse_bool_flag(pipeline_cfg.get("identity_guard"), True)
     identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
+    if getattr(args, "no_identity_guard", False):
+        LOGGER.warning(
+            "Identity purity checks disabled via --no-identity-guard; guard and split enforcement will be skipped."
+        )
+        identity_guard_enabled = False
+        identity_split_enabled = False
     identity_sim_threshold = float(pipeline_cfg.get("identity_sim_threshold", 0.55))
     identity_min_picks = int(pipeline_cfg.get("identity_min_picks", 3))
 
@@ -621,11 +673,23 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
 
 def run_scene_aware_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
-    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(pipeline_cfg.get("det_size", [960, 960]))
+    cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
+    det_size_cfg = pipeline_cfg.get("det_size", [960, 960]) or [960, 960]
+    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(det_size_cfg)
     face_conf = args.face_det_threshold or pipeline_cfg.get("face_conf_th", 0.45)
 
-    if args.fast and args.retina_det_size is None:
+    if cpu_preset_enabled and args.retina_det_size is None:
         det_size = (640, 640)
+    elif args.fast and args.retina_det_size is None:
+        det_size = (640, 640)
+    if getattr(args, "_cpu_preset", False):
+        stride_for_log = args.stride if args.stride is not None else pipeline_cfg.get("stride", 1)
+        LOGGER.info(
+            "Applying CPU preset: stride=%s, detector=%dx%d. Override with --stride or --retina-det-size.",
+            stride_for_log,
+            det_size[0],
+            det_size[1],
+        )
 
     providers = tuple(args.onnx_providers) if args.onnx_providers else None
     face_detector = RetinaFaceDetector(
@@ -1027,6 +1091,7 @@ def main() -> None:
     args.progress_interval = max(0.1, float(args.progress_interval))
     args.heartbeat_sec = max(0.1, float(args.heartbeat_sec))
     args._retina_size_override = args.retina_det_size is not None  # type: ignore[attr-defined]
+    args._cpu_preset = False  # type: ignore[attr-defined]
 
     if args.fast:
         if args.retina_det_size is None:

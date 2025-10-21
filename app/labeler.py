@@ -637,6 +637,7 @@ def main() -> None:
     quality_percentile = st.sidebar.slider("Quality percentile", 0, 100, 0)
     search_term = st.sidebar.text_input("Search track / byte id")
     manifest_df = load_manifest_cached(str(harvest_dir))
+    samples_df = load_samples_cached(str(harvest_dir))
     clusters = load_clusters_cached(str(harvest_dir))
     track_to_cluster = {track: cid for cid, tracks in clusters.items() for track in tracks}
     if track_to_cluster:

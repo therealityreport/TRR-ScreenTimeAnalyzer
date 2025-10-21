@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
-
-from pathlib import Path
+import pytest
 
 from screentime.harvest.harvest import HarvestConfig, HarvestRunner
 from screentime.io_utils import infer_video_stem
@@ -80,3 +81,37 @@ def test_harvest_runner_respects_explicit_root(tmp_path):
     assert manifest_path.parent == explicit_dir
     nested_path = explicit_dir / infer_video_stem(video_path)
     assert not nested_path.exists(), "Legacy-style nested directory should not be created for explicit roots."
+
+
+def test_harvest_runner_skips_embedder_when_guard_disabled(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    video_path = tmp_path / "blank.mp4"
+    _create_blank_video(video_path)
+
+    calls = {"init": 0, "embed": 0}
+
+    class _SentinelEmbedder:
+        def __init__(self, *args, **kwargs):
+            calls["init"] += 1
+
+        def embed(self, image):
+            calls["embed"] += 1
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr("screentime.harvest.harvest.ArcFaceEmbedder", _SentinelEmbedder)
+
+    config = HarvestConfig(
+        identity_guard=False,
+        identity_split=False,
+        samples_per_track=1,
+        write_candidates=False,
+        reindex_harvest_tracks=True,
+        stitch_identities=False,
+    )
+
+    runner = HarvestRunner(_NullPersonDetector(), _NullFaceDetector(), _NullTracker(), config)
+    output_root = tmp_path / "output"
+    runner.run(video_path, output_root)
+
+    assert calls["init"] == 0, "ArcFace embedder should not be constructed when identity_guard is disabled."
+    assert calls["embed"] == 0, "Embeddings should not be computed when identity_guard is disabled."
+    assert runner.embedder is None, "HarvestRunner should leave embedder unset when identity_guard is disabled."
