@@ -31,7 +31,7 @@ target_area_frac: 0.02            # area fraction considered "ideal" for quality
 debug_rejections: true            # ENABLE to see rejection reasons
 multi_face_per_track_guard: true
 multi_face_tiebreak: quality
-fallback_head_pct: 0.4
+fallback_head_pct: 0.4          # expand unmatched faces by this pct to synthesize a head bbox
 
 # Identity purity guard & harvest track indexing
 identity_guard: true
