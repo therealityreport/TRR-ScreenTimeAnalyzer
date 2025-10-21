@@ -510,3 +510,51 @@ def main():
         total_original = sum(r.get('original_count', 0) for r in results)
         total_kept = sum(r.get('kept_count', 0) for r in results)
         total_removed = sum(r.get('removed_count', 0) for r in results)
+        
+        print(f"\n🎬 Processed {len(results)} cast members:")
+        print(f"  • Original images: {total_original}")
+        print(f"  • Images kept: {total_kept} ({total_kept/total_original*100:.1f}%)")
+        print(f"  • Images removed: {total_removed} ({total_removed/total_original*100:.1f}%)")
+        
+        print(f"\n📋 Per-Person Summary:")
+        print(f"{'Name':<15} {'Original':<10} {'Kept':<10} {'Removed':<10} {'Quality':<10}")
+        print("-" * 70)
+        
+        for result in sorted(results, key=lambda r: r.get('name', '')):
+            if result['status'] == 'success':
+                name = result['name']
+                orig = result['original_count']
+                kept = result['kept_count']
+                removed = result['removed_count']
+                quality_fail = result['quality_failed']
+                
+                print(f"{name:<15} {orig:<10} {kept:<10} {removed:<10} {quality_fail:<10}")
+    
+    print("\n" + "="*70)
+    if dry_run or test_mode:
+        print("✅ Simulation Complete!")
+        if test_mode:
+            print(f"\n💡 To run for real on BRANDI: Remove --test flag")
+            print(f"💡 To run on ALL cast: Remove --test flag and run normally")
+    else:
+        print("✅ Cleanup Complete!")
+    print("="*70)
+    
+    if not dry_run and not test_mode:
+        print(f"\n💡 Next steps:")
+        print(f"  1. Review removed images in: {removed_root}")
+        print(f"  2. Rebuild facebank: python3 scripts/build_facebank.py --facebank-dir data/facebank --output-dir data")
+        print(f"  3. Run tracker with optimized facebank!")
+        print(f"\n🔄 To restore: Copy from {backup_root} back to {facebank_dir}")
+    print("="*70)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Cancelled by user")
+    except Exception as e:
+        print(f"\n\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
