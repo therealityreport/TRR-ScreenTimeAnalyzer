@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import os
 from collections import Counter
 import shutil
@@ -41,22 +42,34 @@ def _providers_cpu_only(providers: Optional[Sequence[str]]) -> bool:
 
 
 def _maybe_apply_cpu_preset(args: argparse.Namespace, pipeline_cfg: dict) -> bool:
-    if (
+    if not (
         _providers_cpu_only(getattr(args, "onnx_providers", None))
         and not getattr(args, "fast", False)
-        and getattr(args, "stride", None) is None
         and getattr(args, "retina_det_size", None) is None
     ):
-        default_stride = pipeline_cfg.get("stride", 1)
-        try:
-            stride_value = int(default_stride)
-        except (TypeError, ValueError):
-            stride_value = 1
-        args.stride = max(2, stride_value)
-        args._cpu_preset = True  # type: ignore[attr-defined]
-        return True
-    args._cpu_preset = False  # type: ignore[attr-defined]
-    return False
+        args._cpu_preset = False  # type: ignore[attr-defined]
+        return False
+
+    default_stride = pipeline_cfg.get("stride", 1)
+    try:
+        stride_value = int(default_stride)
+    except (TypeError, ValueError):
+        stride_value = 1
+    min_stride = max(2, stride_value)
+
+    current_stride = getattr(args, "stride", None)
+    try:
+        current_stride_int = None if current_stride is None else int(current_stride)
+    except (TypeError, ValueError):
+        current_stride_int = None
+
+    if current_stride_int is None or current_stride_int < min_stride:
+        args.stride = min_stride
+    else:
+        args.stride = current_stride_int
+
+    args._cpu_preset = True  # type: ignore[attr-defined]
+    return True
 
 
 def _normalize_threads(value: int) -> int:
@@ -140,7 +153,7 @@ def build_session_options(thread_count: int):
     return session_options
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
@@ -316,6 +329,12 @@ def parse_args() -> argparse.Namespace:
         help="Enable fast mode (stride=2, 640 detector, threads=1, disable debug rejects).",
     )
     parser.add_argument(
+        "--samples-per-sec",
+        type=float,
+        default=None,
+        help="Target samples per second. When set, overrides --stride by sampling ceil(FPS / value).",
+    )
+    parser.add_argument(
         "--stride",
         type=int,
         default=None,
@@ -421,7 +440,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable the relaxed recall pass.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 def _resolve_existing_path(path_str: str, nested_dir: Path) -> Path:
     candidate = Path(path_str)
@@ -506,7 +525,7 @@ def migrate_nested_harvest(out_root: Path) -> None:
 
 
 
-def run_standard_harvest(args: argparse.Namespace) -> None:
+def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCapture] = None) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
     cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
@@ -692,10 +711,11 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         harvest_config.stride = max(2, harvest_config.stride)
 
     runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
-    manifest_path = runner.run(args.video, output_root, legacy_layout=legacy_layout)
+    capture = cap if cap is not None else getattr(args, "_capture", None)
+    manifest_path = runner.run(args.video, output_root, legacy_layout=legacy_layout, cap=capture)
     LOGGER.info("Harvest manifest written to %s", manifest_path)
 
-def run_scene_aware_harvest(args: argparse.Namespace) -> None:
+def run_scene_aware_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCapture] = None) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
     det_size_cfg = pipeline_cfg.get("det_size", [960, 960]) or [960, 960]
@@ -739,12 +759,16 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
     out_dir = ensure_dir(harvest_dir.expanduser().resolve())
     migrate_nested_harvest(out_dir)
 
-    cap = cv2.VideoCapture(str(args.video))
-    if not cap.isOpened():
+    capture = cap if cap is not None else getattr(args, "_capture", None)
+    owns_cap = False
+    if capture is None:
+        capture = cv2.VideoCapture(str(args.video))
+        owns_cap = True
+    if not capture.isOpened():
         raise RuntimeError(f"Unable to open video: {args.video}")
 
     try:
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
             LOGGER.warning("Video %s reported zero frame count; seek accuracy may be limited.", args.video)
 
@@ -819,8 +843,8 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
             for scene_idx, frame_idx in frames_to_process:
                 if frame_idx < 0:
                     continue
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ok, frame = cap.read()
+                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ok, frame = capture.read()
                 if not ok or frame is None:
                     LOGGER.warning("Failed to read frame %d for scene %d.", frame_idx, scene_idx)
                     continue
@@ -908,7 +932,8 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         elif args.cluster_preview:
             LOGGER.warning("Cluster preview requested but no candidate crops were written; skipping clustering.")
     finally:
-        cap.release()
+        if owns_cap:
+            capture.release()
 
 
 def run_cluster_preview(
@@ -1117,26 +1142,50 @@ def main() -> None:
     args._retina_size_override = args.retina_det_size is not None  # type: ignore[attr-defined]
     args._cpu_preset = False  # type: ignore[attr-defined]
 
+    cap = cv2.VideoCapture(str(args.video))
+    if not cap.isOpened():
+        raise SystemExit(f"Unable to open video: {args.video}")
+
+    samples_per_sec = args.samples_per_sec
+    try:
+        target_samples = None if samples_per_sec is None else float(samples_per_sec)
+    except (TypeError, ValueError):
+        target_samples = None
+    if target_samples is not None and target_samples > 0:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if fps > 0.0 and getattr(args, "stride", None) is None:
+            args.stride = max(1, int(math.ceil(fps / target_samples)))
+
+    args._capture = cap  # type: ignore[attr-defined]
+
     if args.fast:
         if args.retina_det_size is None:
             args.retina_det_size = [640, 640]
-        if args.stride is None:
+        try:
+            stride_int = None if args.stride is None else int(args.stride)
+        except (TypeError, ValueError):
+            stride_int = None
+        if stride_int is None or stride_int < 2:
             args.stride = 2
+        else:
+            args.stride = stride_int
         if not threads_explicit:
             args.threads = 1
 
-    configure_threads(args.threads)
-    args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
-    setup_logging()
+    try:
+        configure_threads(args.threads)
+        args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
+        setup_logging()
 
-    if args.scene_aware:
-        run_scene_aware_harvest(args)
-        return
+        if args.scene_aware:
+            run_scene_aware_harvest(args, cap=cap)
+        else:
+            if not args.person_weights:
+                raise SystemExit("--person-weights is required unless --scene-aware is enabled.")
 
-    if not args.person_weights:
-        raise SystemExit("--person-weights is required unless --scene-aware is enabled.")
-
-    run_standard_harvest(args)
+            run_standard_harvest(args, cap=cap)
+    finally:
+        cap.release()
 
 
 if __name__ == "__main__":
