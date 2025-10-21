@@ -77,6 +77,31 @@ def _parse_bool_flag(value, default: bool) -> bool:
         return default
 
 
+def _resolve_min_frontalness(args: argparse.Namespace, pipeline_cfg: dict, legacy_default: float = 0.20) -> float:
+    """Resolve the minimum frontalness threshold honoring overrides."""
+
+    cli_override = None
+    if getattr(args, "frontalness_thresh", None) is not None:
+        cli_override = args.frontalness_thresh
+    elif getattr(args, "min_frontalness", None) is not None:
+        cli_override = args.min_frontalness
+
+    if cli_override is not None:
+        try:
+            return float(cli_override)
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid CLI frontalness override %r; falling back to config/default", cli_override)
+
+    cfg_value = pipeline_cfg.get("min_frontalness")
+    if cfg_value is not None:
+        try:
+            return float(cfg_value)
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid pipeline min_frontalness %r; falling back to legacy default", cfg_value)
+
+    return float(legacy_default)
+
+
 def configure_threads(thread_count: int) -> None:
     """Limit math library thread usage to manage thermals."""
     threads = _normalize_threads(thread_count)
@@ -265,7 +290,7 @@ def parse_args() -> argparse.Namespace:
         "--frontalness-thresh",
         type=float,
         default=None,
-        help="Alias for --min-frontalness (defaults to 0.20 when unset).",
+        help="Alias for --min-frontalness (defaults to pipeline config value, or 0.20 if unspecified).",
     )
     parser.add_argument(
         "--min-sharpness-pct",
@@ -547,8 +572,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
-    frontal_override = args.frontalness_thresh if args.frontalness_thresh is not None else args.min_frontalness
-    min_frontalness = float(frontal_override) if frontal_override is not None else 0.20
+    min_frontalness = _resolve_min_frontalness(args, pipeline_cfg)
     sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
     if sharpness_pctile is None:
         legacy_pct = pipeline_cfg.get("min_sharpness_pct")

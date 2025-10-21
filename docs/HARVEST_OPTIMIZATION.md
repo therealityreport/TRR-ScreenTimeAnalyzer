@@ -66,6 +66,8 @@ python scripts/harvest_faces.py \
 
 Add `--fast` when you need a quick low-heat sanity pass (stride = 2, RetinaFace 640, deferred embeddings).
 
+> **Tip:** If you leave `--min-frontalness`/`--frontalness-thresh` unset, the CLI now uses the `min_frontalness` value from your selected pipeline config, falling back to 0.20 only when neither CLI nor config specifies a threshold.
+
 ### Live Monitoring
 
 - Watch `progress.json` update in real time:
