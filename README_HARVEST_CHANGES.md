@@ -51,6 +51,7 @@ Based on the changes, you should see:
 - `--threads N` caps CPU math/ONNX threads. The default is 1; `--fast` now forces 1 unless you override it explicitly.
 - `--fast` bundles: stride=2, RetinaFace 640×640, `--defer-embeddings`, `--threads 1`, and disables debug rejection crops.
 - `--defer-embeddings` skips ArcFace during harvest so you can generate embeddings later during clustering/facebank builds.
+- `--no-identity-guard` disables ArcFace-powered identity purity checks and automatic identity splitting for faster but less-safe runs.
 - `--progress-interval` (percent) and `--heartbeat-sec` (seconds) tune log cadence. Default progress is 1% and heartbeat is 2 s.
 - Every harvest now writes `progress.json` alongside the crops, e.g.
   ```json

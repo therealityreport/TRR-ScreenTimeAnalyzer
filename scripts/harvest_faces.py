@@ -227,6 +227,11 @@ def parse_args() -> argparse.Namespace:
         help="Minimum IoU for stitching adjacency (default 0.1).",
     )
     parser.add_argument(
+        "--no-identity-guard",
+        action="store_true",
+        help="Disable identity purity guard checks (skips ArcFace embeddings and identity splitting).",
+    )
+    parser.add_argument(
         "--min-frontalness",
         type=float,
         default=None,
@@ -552,6 +557,12 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     identity_guard_cosine_reject = float(pipeline_cfg.get("identity_guard_cosine_reject", 0.35))
     identity_guard_enabled = _parse_bool_flag(pipeline_cfg.get("identity_guard"), True)
     identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
+    if args.no_identity_guard:
+        identity_guard_enabled = False
+        identity_split_enabled = False
+        LOGGER.warning(
+            "Identity guard disabled via --no-identity-guard; ArcFace embeddings and identity purity checks will be skipped."
+        )
     identity_sim_threshold = float(pipeline_cfg.get("identity_sim_threshold", 0.55))
     identity_min_picks = int(pipeline_cfg.get("identity_min_picks", 3))
 
