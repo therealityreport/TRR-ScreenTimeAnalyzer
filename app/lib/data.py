@@ -22,6 +22,12 @@ class TrackAssignment:
     persons: List[str]
     sources: List[str]
     destinations: List[str]
+    source_to_person: Dict[str, str]
+    destination_to_person: Dict[str, str]
+
+
+UNASSIGNED_CLUSTER_ID = 0
+
 
 def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
     """Load clusters.json if present; returns {cluster_id: [track_ids]} mapping."""
@@ -40,7 +46,50 @@ def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
         if cid < 0 or not tracks:
             continue
         clusters[cid] = sorted(tracks)
+    clusters.setdefault(UNASSIGNED_CLUSTER_ID, [])
     return clusters
+
+
+def save_clusters(harvest_dir: Path, clusters: Dict[int, List[int]]) -> None:
+    """Persist clusters.json with the provided mapping."""
+
+    cluster_path = harvest_dir / "clusters.json"
+    cluster_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "clusters": [
+            {"id": int(cid), "tracks": sorted({int(t) for t in tracks})}
+            for cid, tracks in sorted(clusters.items(), key=lambda item: item[0])
+            if cid is not None
+        ]
+    }
+    with cluster_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+def move_track_to_cluster(
+    harvest_dir: Path, clusters: Dict[int, List[int]], track_id: int, new_cluster: Optional[int]
+) -> Dict[int, List[int]]:
+    """Move track_id into new_cluster (or unassign) and persist the change."""
+
+    track_id = int(track_id)
+    normalized: Dict[int, List[int]] = {}
+    for cid, tracks in clusters.items():
+        normalized[cid] = sorted({int(t) for t in tracks if t is not None})
+
+    for tracks in normalized.values():
+        if track_id in tracks:
+            tracks.remove(track_id)
+
+    if new_cluster is not None:
+        new_cluster = int(new_cluster)
+        bucket = normalized.setdefault(new_cluster, [])
+        if track_id not in bucket:
+            bucket.append(track_id)
+            bucket.sort()
+
+    normalized.setdefault(UNASSIGNED_CLUSTER_ID, [])
+    save_clusters(harvest_dir, normalized)
+    return normalized
 
 
 
@@ -277,7 +326,13 @@ def load_assignments(log_path: Path) -> Tuple[List[Dict], Dict[TrackKey, TrackAs
             )
             info = index.get(key)
             if info is None:
-                info = TrackAssignment(persons=[], sources=[], destinations=[])
+                info = TrackAssignment(
+                    persons=[],
+                    sources=[],
+                    destinations=[],
+                    source_to_person={},
+                    destination_to_person={},
+                )
                 index[key] = info
             person = entry.get("person")
             if person and person not in info.persons:
@@ -291,8 +346,12 @@ def load_assignments(log_path: Path) -> Tuple[List[Dict], Dict[TrackKey, TrackAs
                     dest = str(file_entry)
                 if source and source not in info.sources:
                     info.sources.append(source)
+                if source and person:
+                    info.source_to_person.setdefault(source, person)
                 if dest and dest not in info.destinations:
                     info.destinations.append(dest)
+                if dest and person:
+                    info.destination_to_person.setdefault(dest, person)
     return entries, index
 
 
