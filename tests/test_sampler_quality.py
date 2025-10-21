@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("cv2")
+
 from screentime.harvest.harvest import HarvestConfig, HarvestRunner, TrackSamplingState
 from screentime.types import FaceSample
 
