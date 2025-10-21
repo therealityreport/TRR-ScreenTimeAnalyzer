@@ -44,6 +44,8 @@ class HarvestConfig:
     dilate_track_px: float = 0.07
     temporal_iou_tolerance: int = 1
     profile_asymmetry_thresh: float = 0.35
+    profile_quota: int = 0
+    profile_min_frontalness: float = 0.0
     quality_weights: Tuple[float, float, float] = (0.5, 0.3, 0.2)
     target_area_frac: float = 0.02
     debug_rejections: bool = False
@@ -58,6 +60,8 @@ class HarvestConfig:
     identity_guard_stride: int = 6
     identity_guard_consecutive: int = 3
     identity_guard_cosine_reject: float = 0.35
+    identity_guard_recovery: int = 2
+    identity_guard_recover_margin: float = 0.05
     # Reindex harvest folders independent of ByteTrack ids
     reindex_harvest_tracks: bool = True
     fast_mode: bool = False
@@ -91,6 +95,7 @@ class SampleCandidate:
     orientation: str
     picked: bool = False
     reason: Optional[str] = None
+    recall_only: bool = False
 
 
 @dataclass
@@ -101,6 +106,7 @@ class AssignedFace:
     score: float
     person_bbox: Tuple[float, float, float, float]
     frame_offset: int = 0
+    recall_only: bool = False
 
 
 @dataclass
@@ -122,6 +128,7 @@ class TrackSamplingState:
         area_frac: float,
         orientation: str,
         config: HarvestConfig,
+        recall_only: bool = False,
     ) -> Optional[FaceSample]:
         candidate = SampleCandidate(
             sample=sample,
@@ -130,6 +137,7 @@ class TrackSamplingState:
             frontalness=frontalness,
             area_frac=area_frac,
             orientation=orientation,
+            recall_only=recall_only,
         )
         self.candidates.append(candidate)
         self.candidates.sort(key=lambda c: (c.quality, -c.sample.frame_idx), reverse=True)
@@ -161,19 +169,30 @@ class TrackSamplingState:
         sharp_gate = max(sharp_thresholds) if sharp_thresholds else None
 
         eligible_candidates: List[SampleCandidate] = []
+        profile_candidates: List[SampleCandidate] = []
+        profile_quota = max(0, int(config.profile_quota))
+        profile_floor = float(max(0.0, config.profile_min_frontalness))
         for candidate in sorted_candidates:
-            if candidate.frontalness < config.min_frontalness:
-                candidate.reason = "rejected_frontalness"
-                continue
             if sharp_gate is not None and candidate.sharpness < sharp_gate:
                 candidate.reason = "rejected_sharpness"
                 continue
+            if candidate.frontalness < config.min_frontalness:
+                if profile_quota > 0 and candidate.frontalness >= profile_floor:
+                    candidate.reason = "profile_pool"
+                    profile_candidates.append(candidate)
+                else:
+                    candidate.reason = "rejected_frontalness"
+                continue
             eligible_candidates.append(candidate)
 
-        if not eligible_candidates:
+        if not eligible_candidates and not profile_candidates:
             return []
 
-        required = min(config.samples_per_track, len(eligible_candidates))
+        max_profile = min(profile_quota, len(profile_candidates))
+        required = min(
+            config.samples_per_track,
+            len(eligible_candidates) + max_profile,
+        )
         min_gap = max(config.min_gap_frames, 0)
 
         for candidate in eligible_candidates:
@@ -190,6 +209,30 @@ class TrackSamplingState:
                     continue
                 candidate.picked = True
                 candidate.reason = "picked"
+                selected.append(candidate)
+                if len(selected) >= min(config.samples_min, required):
+                    break
+
+        if profile_candidates and len(selected) < required:
+            profile_candidates.sort(key=lambda c: (c.quality, c.sharpness), reverse=True)
+            profile_added = 0
+            for candidate in profile_candidates:
+                if profile_added >= max_profile:
+                    break
+                if len(selected) >= required:
+                    break
+                if all(abs(candidate.sample.frame_idx - chosen.sample.frame_idx) >= min_gap for chosen in selected):
+                    candidate.picked = True
+                    candidate.reason = "picked_profile"
+                    selected.append(candidate)
+                    profile_added += 1
+
+        if len(selected) < min(config.samples_min, required):
+            for candidate in profile_candidates:
+                if candidate.picked or candidate.reason == "rejected_sharpness":
+                    continue
+                candidate.picked = True
+                candidate.reason = "picked_profile"
                 selected.append(candidate)
                 if len(selected) >= min(config.samples_min, required):
                     break
@@ -228,7 +271,7 @@ class TrackSamplingState:
         # ensure ordering back to original quality sort
         selected.sort(key=lambda c: c.sample.frame_idx)
 
-        for candidate in eligible_candidates:
+        for candidate in eligible_candidates + profile_candidates:
             if not candidate.picked and candidate.reason is None:
                 candidate.reason = "not_selected"
 
@@ -254,6 +297,7 @@ class TrackSamplingState:
                 "identity_cosine": candidate.sample.identity_cosine,
                 "similarity_to_centroid": candidate.sample.similarity_to_centroid,
                 "provider": candidate.sample.provider,
+                "recall_only": candidate.sample.recall_only,
             }
 
 
@@ -284,13 +328,21 @@ class HarvestRunner:
         cap: Optional[cv2.VideoCapture] = None,
     ) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
-        if self.config.identity_guard and self.embedder is None:
+        identity_guard_requested = self.config.identity_guard
+        identity_split_requested = self.config.identity_split
+        guard_fallback_reason: Optional[str] = None
+        if identity_guard_requested and self.embedder is None:
             try:
                 self.embedder = ArcFaceEmbedder(threads=self.config.threads)
             except Exception as exc:  # pragma: no cover - runtime guard
-                raise RuntimeError(
-                    "ArcFace embedder unavailable; identity_guard requires embeddings to run"
-                ) from exc
+                guard_fallback_reason = f"{exc.__class__.__name__}: {exc}"
+                LOGGER.warning(
+                    "ArcFace embedder unavailable; disabling identity guard and split: %s",
+                    exc,
+                )
+                self.embedder = None
+                self.config.identity_guard = False
+                self.config.identity_split = False
         capture = cap
         owns_cap = False
         if capture is None:
@@ -350,6 +402,9 @@ class HarvestRunner:
         guard_stride = max(1, int(self.config.identity_guard_stride))
         guard_reject_thresh = float(self.config.identity_guard_cosine_reject)
         guard_consecutive = max(1, int(self.config.identity_guard_consecutive))
+        guard_recovery: Dict[int, int] = defaultdict(int)
+        guard_recovery_need = max(1, int(self.config.identity_guard_recovery))
+        guard_recover_margin = float(max(0.0, self.config.identity_guard_recover_margin))
 
         def _harvest_dirname(track_id: int, byte_id: Optional[int]) -> str:
             if self.config.reindex_harvest_tracks or byte_id is None:
@@ -381,6 +436,7 @@ class HarvestRunner:
                 sample.area_frac,
                 sample.orientation,
                 self.config,
+                sample.recall_only,
             )
             if removed is not None:
                 removed_event = candidate_event_lookup.get((removed.track_id, removed.frame_idx))
@@ -707,6 +763,7 @@ class HarvestRunner:
 
             face_dets = self.face_detector.detect(frame, frame_idx)
             assignments: Dict[int, AssignedFace] = {}
+            recall_assignments: Dict[int, AssignedFace] = {}
             unmatched_faces = set(range(len(face_dets)))
 
             def prefer_candidate(current: AssignedFace, candidate: AssignedFace) -> bool:
@@ -833,6 +890,30 @@ class HarvestRunner:
                     width,
                     height,
                 )
+                if (
+                    self.config.recall_pass
+                    and best_track is not None
+                    and best_bbox is not None
+                    and best_track not in assignments
+                    and best_track not in recall_assignments
+                ):
+                    face_iou = float(iou(face.bbox, best_bbox))
+                    if (
+                        face.score >= self.config.recall_det_thresh
+                        and best_iou >= self.config.recall_track_iou
+                        and face_iou >= self.config.recall_face_iou
+                    ):
+                        recall_assignments[best_track] = AssignedFace(
+                            face_idx=face_idx,
+                            mode="recall",
+                            overlap=float(best_iou),
+                            score=float(face.score),
+                            person_bbox=best_bbox,
+                            frame_offset=0,
+                            recall_only=True,
+                        )
+                        unmatched_faces.discard(face_idx)
+                        continue
                 record_reject(
                     best_track,
                     "rejected_low_iou",
@@ -929,6 +1010,7 @@ class HarvestRunner:
                     match_mode=assignment.mode,
                     match_frame_offset=assignment.frame_offset,
                     image=aligned,
+                    recall_only=assignment.recall_only,
                 )
 
                 embedding: Optional[np.ndarray] = None
@@ -963,6 +1045,7 @@ class HarvestRunner:
                     "frame_offset": int(assignment.frame_offset),
                     "identity_cosine": None,
                     "provider": embed_provider,
+                    "recall_only": assignment.recall_only,
                 }
 
                 sim: Optional[float] = None
@@ -978,8 +1061,10 @@ class HarvestRunner:
                             face_sample.identity_cosine = sim
 
                         if sim is not None and sim < guard_reject_thresh:
+                            queue = guard_pending_samples.setdefault(hid, [])
                             guard_streak[hid] += 1
-                            guard_pending_samples[hid].append((face_sample, event_payload, embedding))
+                            guard_recovery[hid] = 0
+                            queue.append((face_sample, event_payload, embedding))
                             if guard_streak[hid] >= guard_consecutive:
                                 prev_hid = hid
                                 new_hid = _new_harvest_id()
@@ -997,28 +1082,48 @@ class HarvestRunner:
                                 pending_items = guard_pending_samples.pop(prev_hid, [])
                                 guard_streak[prev_hid] = 0
                                 guard_streak[new_hid] = 0
+                                guard_recovery[prev_hid] = 0
+                                guard_recovery[new_hid] = 0
                                 for pending_sample, pending_payload, pending_embed in pending_items:
                                     pending_sample.track_id = new_hid
                                     pending_sample.byte_track_id = byte_id
                                     pending_payload = dict(pending_payload)
                                     pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                                    pending_payload["recall_only"] = pending_sample.recall_only
                                     _commit_candidate(pending_sample, pending_embed, pending_payload)
                                 continue
+                            continue
+
+                        queue = guard_pending_samples.get(hid)
+                        guard_streak[hid] = 0
+                        if queue:
+                            if sim is None:
+                                guard_recovery[hid] = guard_recovery_need
+                            elif sim >= guard_reject_thresh + guard_recover_margin:
+                                guard_recovery[hid] += 1
                             else:
+                                guard_recovery[hid] = 0
+                            queue.append((face_sample, event_payload, embedding))
+                            if guard_recovery[hid] < guard_recovery_need:
                                 continue
-                        else:
-                            guard_streak[hid] = 0
-                            pending_items = guard_pending_samples.pop(hid, [])
-                            for pending_sample, pending_payload, pending_embed in pending_items:
+                            released = guard_pending_samples.pop(hid, [])
+                            guard_recovery[hid] = 0
+                            for pending_sample, pending_payload, pending_embed in released:
                                 pending_payload = dict(pending_payload)
                                 pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                                pending_payload["recall_only"] = pending_sample.recall_only
                                 _commit_candidate(pending_sample, pending_embed, pending_payload)
+                            continue
+                        guard_recovery[hid] = 0
                 if not guard_checked:
                     guard_streak[hid] = 0
                     pending_items = guard_pending_samples.pop(hid, [])
+                    if pending_items:
+                        guard_recovery[hid] = 0
                     for pending_sample, pending_payload, pending_embed in pending_items:
                         pending_payload = dict(pending_payload)
                         pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                        pending_payload["recall_only"] = pending_sample.recall_only
                         _commit_candidate(pending_sample, pending_embed, pending_payload)
 
                 if sim is None and embedding is not None and guard_count.get(hid, 0) >= self.config.identity_min_picks:
@@ -1054,7 +1159,83 @@ class HarvestRunner:
                     face_sample.track_id = hid
 
                 event_payload["identity_cosine"] = face_sample.identity_cosine
+                event_payload["recall_only"] = assignment.recall_only
                 _commit_candidate(face_sample, embedding, event_payload)
+
+            if recall_assignments:
+                for byte_id, assignment in recall_assignments.items():
+                    if byte_id in assignments:
+                        continue
+                    hid = byte_to_harvest.get(byte_id)
+                    if hid is None:
+                        hid = _new_harvest_id()
+                        byte_to_harvest[byte_id] = hid
+                        harvest_source_byte[hid] = byte_id
+                    face = face_dets[assignment.face_idx]
+                    if not self._passes_area_threshold(face.bbox, frame_area):
+                        continue
+                    aligned = face.aligned
+                    sharpness = self._compute_sharpness(aligned)
+                    orientation, frontalness = self._orientation_metrics(face.landmarks)
+                    area_frac = bbox_area(face.bbox) / frame_area if frame_area > 0 else 0.0
+                    quality = self._score_quality(sharpness, frontalness, area_frac)
+
+                    face_sample = FaceSample(
+                        track_id=hid,
+                        byte_track_id=byte_id,
+                        frame_idx=frame_idx,
+                        timestamp_ms=timestamp_ms,
+                        path=Path(),
+                        score=face.score,
+                        bbox=face.bbox,
+                        quality=quality,
+                        sharpness=sharpness,
+                        orientation=orientation,
+                        frontalness=frontalness,
+                        area_frac=area_frac,
+                        person_bbox=assignment.person_bbox,
+                        association_iou=float(assignment.overlap),
+                        match_mode=assignment.mode,
+                        match_frame_offset=assignment.frame_offset,
+                        image=aligned,
+                        recall_only=True,
+                    )
+                    embedding = None
+                    embed_provider = None
+                    if self.embedder is not None and not self.config.defer_embeddings:
+                        try:
+                            embedding = self.embedder.embed(aligned)
+                            embed_provider = getattr(self.embedder, "backend", None)
+                            if not embed_provider and hasattr(self.embedder, "providers"):
+                                providers = list(getattr(self.embedder, "providers"))
+                                embed_provider = providers[0] if providers else None
+                        except Exception as exc:  # pragma: no cover - defensive runtime guard
+                            LOGGER.warning("Embedding failed for recall track %s frame %s: %s", hid, frame_idx, exc)
+                            embedding = None
+                    face_sample.provider = embed_provider
+                    if self.config.defer_embeddings:
+                        face_sample.embedding = None
+                    else:
+                        face_sample.embedding = embedding
+
+                    event_payload = {
+                        "reason": "candidate",
+                        "byte_track_id": byte_id,
+                        "face_bbox": list(map(float, face.bbox)),
+                        "person_bbox": list(map(float, assignment.person_bbox)),
+                        "association_iou": float(assignment.overlap),
+                        "sharpness": float(sharpness),
+                        "frontalness": float(frontalness),
+                        "quality": float(quality),
+                        "area_frac": float(area_frac),
+                        "match_mode": assignment.mode,
+                        "frame_offset": int(assignment.frame_offset),
+                        "identity_cosine": None,
+                        "provider": embed_provider,
+                        "recall_only": True,
+                    }
+                    event_payload["identity_cosine"] = face_sample.identity_cosine
+                    _commit_candidate(face_sample, embedding, event_payload)
 
             log_progress(frames_seen)
             last_frames_seen = frames_seen
@@ -1064,8 +1245,10 @@ class HarvestRunner:
                 for pending_sample, pending_payload, pending_embed in pending_items:
                     pending_payload = dict(pending_payload)
                     pending_payload["identity_cosine"] = pending_sample.identity_cosine
+                    pending_payload["recall_only"] = pending_sample.recall_only
                     _commit_candidate(pending_sample, pending_embed, pending_payload)
                 guard_pending_samples.pop(hid, None)
+                guard_recovery.pop(hid, None)
 
         if last_frames_seen:
             if last_frames_seen < next_progress_log:
@@ -1212,6 +1395,7 @@ class HarvestRunner:
                 "identity_cosine",
                 "similarity_to_centroid",
                 "provider",
+                "recall_only",
             ]
             with selected_csv.open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
@@ -1231,6 +1415,13 @@ class HarvestRunner:
                 payload["identity_splits"] = {
                     str(byte_id): events for byte_id, events in split_events.items()
                 }
+            payload["identity_guard_status"] = {
+                "requested": identity_guard_requested,
+                "requested_split": identity_split_requested,
+                "active_guard": self.config.identity_guard,
+                "active_split": self.config.identity_split,
+                "fallback_reason": guard_fallback_reason,
+            }
             dump_json(debug_path, payload)
             LOGGER.info("Harvest debug log written to %s", debug_path)
 

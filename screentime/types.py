@@ -149,6 +149,7 @@ class FaceSample:
     provider: Optional[str] = None
     identity_cosine: Optional[float] = None
     similarity_to_centroid: Optional[float] = None
+    recall_only: bool = False
 
 
 @dataclass
@@ -194,6 +195,7 @@ class ManifestEntry:
                     "identity_cosine": s.identity_cosine,
                     "similarity_to_centroid": s.similarity_to_centroid,
                     "provider": s.provider,
+                    "recall_only": s.recall_only,
                 }
                 for s in self.samples
             ],

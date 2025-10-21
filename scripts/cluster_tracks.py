@@ -8,7 +8,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -33,9 +33,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("harvest_dir", type=Path, help="Harvest directory containing manifest.json and crops.")
     parser.add_argument(
         "--cluster-thresh",
+        "--sim",
+        dest="cluster_thresh",
         type=float,
         default=0.45,
-        help="Cosine distance threshold for agglomerative clustering (default 0.45).",
+        help="Cosine distance threshold for agglomerative clustering (alias: --sim).",
     )
     parser.add_argument(
         "--min-samples",
@@ -62,15 +64,60 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for selected_samples.csv path.",
     )
+    parser.add_argument(
+        "--min-sharpness",
+        type=float,
+        default=None,
+        help="Minimum sharpness required for picked samples (filters selected_samples.csv).",
+    )
+    parser.add_argument(
+        "--min-area-frac",
+        type=float,
+        default=None,
+        help="Minimum face area fraction required for picked samples.",
+    )
+    parser.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=1,
+        help="Minimum number of tracks required to keep a cluster in the output (default 1).",
+    )
+    parser.add_argument(
+        "--qc-report",
+        type=Path,
+        default=None,
+        help="Optional path for a JSON QC report (defaults to harvest_dir/clusters_qc.json).",
+    )
     return parser.parse_args()
 
 
-def load_selected_samples(harvest_dir: Path, csv_path: Path, min_samples: int) -> List[TrackSamples]:
+def load_selected_samples(
+    harvest_dir: Path,
+    csv_path: Path,
+    min_samples: int,
+    min_sharpness: Optional[float] = None,
+    min_area_frac: Optional[float] = None,
+) -> List[TrackSamples]:
     df = pd.read_csv(csv_path)
     if "picked" in df.columns:
         df = df[df["picked"].astype(str).str.lower().isin({"1", "true", "yes"})]
     if "is_debug" in df.columns:
         df = df[df["is_debug"].astype(str).str.lower().isin({"0", "false", "nan"})]
+
+    if min_sharpness is not None and "sharpness" in df.columns:
+        before = len(df)
+        df = df[df["sharpness"].astype(float) >= float(min_sharpness)]
+        dropped = before - len(df)
+        if dropped:
+            LOGGER.info("Filtered %d samples below sharpness %.2f", dropped, min_sharpness)
+
+    if min_area_frac is not None and "area_frac" in df.columns:
+        before = len(df)
+        df = df[df["area_frac"].astype(float) >= float(min_area_frac)]
+        dropped = before - len(df)
+        if dropped:
+            LOGGER.info("Filtered %d samples below area fraction %.3f", dropped, min_area_frac)
+
     required_cols = {"track_id", "path"}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
@@ -151,6 +198,41 @@ def cluster_tracks(embeddings: Dict[int, np.ndarray], distance_thresh: float) ->
     return clusters
 
 
+def _cluster_metrics(cluster_id: int, track_ids: List[int], embeddings: Dict[int, np.ndarray]) -> Dict[str, object]:
+    vectors = [embeddings[tid] for tid in track_ids if tid in embeddings]
+    metrics: Dict[str, object] = {
+        "original_cluster_id": cluster_id,
+        "size": len(track_ids),
+        "tracks": track_ids,
+    }
+    if len(vectors) < 2:
+        metrics.update(
+            {
+                "pairwise_count": 0,
+                "mean_similarity": 1.0,
+                "min_similarity": 1.0,
+                "max_similarity": 1.0,
+                "variance": 0.0,
+            }
+        )
+        return metrics
+
+    stacked = np.stack(vectors, axis=0)
+    sims = np.clip(stacked @ stacked.T, -1.0, 1.0)
+    idx = np.triu_indices(sims.shape[0], k=1)
+    pairwise = sims[idx]
+    metrics.update(
+        {
+            "pairwise_count": int(pairwise.size),
+            "mean_similarity": float(np.mean(pairwise)),
+            "min_similarity": float(np.min(pairwise)),
+            "max_similarity": float(np.max(pairwise)),
+            "variance": float(np.var(pairwise)),
+        }
+    )
+    return metrics
+
+
 def write_clusters(harvest_dir: Path, clusters: Dict[int, List[int]]) -> Path:
     payload = {
         "clusters": [
@@ -179,7 +261,13 @@ def main() -> None:
     if not csv_path.exists():
         raise SystemExit(f"selected_samples.csv not found in {csv_path.parent}")
 
-    sample_tracks = load_selected_samples(harvest_dir, csv_path, args.min_samples)
+    sample_tracks = load_selected_samples(
+        harvest_dir,
+        csv_path,
+        args.min_samples,
+        min_sharpness=args.min_sharpness,
+        min_area_frac=args.min_area_frac,
+    )
     if not sample_tracks:
         raise SystemExit("No tracks with picked samples available for clustering.")
 
@@ -190,8 +278,46 @@ def main() -> None:
         raise SystemExit("Failed to compute embeddings for any track.")
 
     clusters = cluster_tracks(track_embeddings, args.cluster_thresh)
-    output_path = write_clusters(harvest_dir, clusters)
-    LOGGER.info("Wrote %d clusters to %s", len(clusters), output_path)
+    kept_clusters: Dict[int, List[int]] = {}
+    qc_clusters: List[Dict[str, object]] = []
+    flagged_clusters: List[Dict[str, object]] = []
+    next_cluster_id = 0
+    for original_id, tracks in sorted(clusters.items(), key=lambda item: item[0]):
+        metrics = _cluster_metrics(original_id, tracks, track_embeddings)
+        if len(tracks) >= max(1, args.min_cluster_size):
+            metrics["cluster_id"] = next_cluster_id
+            kept_clusters[next_cluster_id] = tracks
+            qc_clusters.append(metrics)
+            next_cluster_id += 1
+        else:
+            metrics["cluster_id"] = None
+            flagged_clusters.append(metrics)
+
+    if flagged_clusters:
+        LOGGER.info(
+            "Flagged %d clusters smaller than min size %d.",
+            len(flagged_clusters),
+            args.min_cluster_size,
+        )
+
+    output_path = write_clusters(harvest_dir, kept_clusters)
+    LOGGER.info("Wrote %d clusters to %s", len(kept_clusters), output_path)
+
+    qc_path = args.qc_report or (harvest_dir / "clusters_qc.json")
+    qc_payload = {
+        "parameters": {
+            "cluster_threshold": args.cluster_thresh,
+            "min_cluster_size": args.min_cluster_size,
+            "min_samples_per_track": args.min_samples,
+            "min_sharpness": args.min_sharpness,
+            "min_area_frac": args.min_area_frac,
+        },
+        "clusters": qc_clusters,
+        "flagged_clusters": flagged_clusters,
+    }
+    with qc_path.open("w", encoding="utf-8") as fh:
+        json.dump(qc_payload, fh, indent=2)
+    LOGGER.info("Cluster QC report written to %s", qc_path)
 
 
 if __name__ == "__main__":

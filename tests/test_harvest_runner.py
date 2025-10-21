@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -115,3 +116,48 @@ def test_harvest_runner_skips_embedder_when_guard_disabled(tmp_path, monkeypatch
     assert calls["init"] == 0, "ArcFace embedder should not be constructed when identity_guard is disabled."
     assert calls["embed"] == 0, "Embeddings should not be computed when identity_guard is disabled."
     assert runner.embedder is None, "HarvestRunner should leave embedder unset when identity_guard is disabled."
+
+
+def test_harvest_runner_disables_guard_when_embedder_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_path = tmp_path / "blank.mp4"
+    _create_blank_video(video_path)
+
+    class _FailingEmbedder:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("no provider")
+
+    monkeypatch.setattr("screentime.harvest.harvest.ArcFaceEmbedder", _FailingEmbedder)
+
+    config = HarvestConfig(
+        identity_guard=True,
+        identity_split=True,
+        samples_per_track=1,
+        write_candidates=False,
+        reindex_harvest_tracks=True,
+        stitch_identities=False,
+        debug_rejections=True,
+    )
+
+    runner = HarvestRunner(_NullPersonDetector(), _NullFaceDetector(), _NullTracker(), config)
+    output_root = tmp_path / "output"
+
+    manifest_path = runner.run(video_path, output_root)
+
+    assert manifest_path.exists(), "Harvest should still produce a manifest when embeddings fail."
+    assert runner.embedder is None, "Embedder should remain unset after a fallback."
+    assert runner.config.identity_guard is False
+    assert runner.config.identity_split is False
+
+    debug_path = manifest_path.parent / "harvest_debug.json"
+    assert debug_path.exists(), "Debug log should be written when debug_rejections is enabled."
+
+    with debug_path.open("r", encoding="utf-8") as fh:
+        debug_payload = json.load(fh)
+
+    guard_status = debug_payload.get("identity_guard_status")
+    assert guard_status is not None, "Debug payload should record identity guard status."
+    assert guard_status["requested"] is True
+    assert guard_status["active_guard"] is False
+    assert guard_status["fallback_reason"]
