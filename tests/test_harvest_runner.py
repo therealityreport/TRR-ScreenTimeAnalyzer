@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 
 from screentime.harvest.harvest import HarvestConfig, HarvestRunner
+from screentime.io_utils import infer_video_stem
 
 
 class _NullPersonDetector:
@@ -57,3 +58,25 @@ def test_harvest_runner_run_no_crash(tmp_path):
     manifest_path = runner.run(video_path, output_root)
 
     assert manifest_path.exists(), "Harvest runner should produce manifest without errors."
+
+
+def test_harvest_runner_respects_explicit_root(tmp_path):
+    video_path = tmp_path / "blank.mp4"
+    _create_blank_video(video_path)
+
+    config = HarvestConfig(
+        identity_guard=False,
+        identity_split=False,
+        samples_per_track=1,
+        write_candidates=False,
+        reindex_harvest_tracks=True,
+        stitch_identities=False,
+    )
+    runner = HarvestRunner(_NullPersonDetector(), _NullFaceDetector(), _NullTracker(), config)
+
+    explicit_dir = tmp_path / "flat"
+    manifest_path = runner.run(video_path, explicit_dir, legacy_layout=False)
+
+    assert manifest_path.parent == explicit_dir
+    nested_path = explicit_dir / infer_video_stem(video_path)
+    assert not nested_path.exists(), "Legacy-style nested directory should not be created for explicit roots."

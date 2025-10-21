@@ -103,6 +103,7 @@ python scripts/harvest_faces.py \
     --progress-interval 1 \
     --heartbeat-sec 2
 ```
+> **Directory layout update:** When you pass `--harvest-dir`, the harvest now writes `track_*` folders directly inside the directory you provide. Use `--output-dir` (or the default) if you still want the legacy `<root>/<video_stem>/track_*` structure.
 Add `--fast` when you need a quick low-heat pass (stride = 2, RetinaFace 640, deferred embeddings).
 
 #### Step 3: Validate
