@@ -7,9 +7,12 @@ import argparse
 import csv
 import json
 import logging
+import os
 from collections import Counter
 import shutil
+from distutils.util import strtobool
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -27,14 +30,76 @@ from screentime.tracking.bytetrack_wrap import ByteTrackWrapper
 LOGGER = logging.getLogger("scripts.harvest")
 
 
+def _normalize_threads(value: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _parse_bool_flag(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(strtobool(str(value)))
+    except (ValueError, AttributeError):
+        return default
+
+
+def configure_threads(thread_count: int) -> None:
+    """Limit math library thread usage to manage thermals."""
+    threads = _normalize_threads(thread_count)
+    defaults = {
+        "OMP_NUM_THREADS": str(threads),
+        "MKL_NUM_THREADS": str(threads),
+        "OPENBLAS_NUM_THREADS": str(threads),
+        "NUMEXPR_NUM_THREADS": str(threads),
+        "ORT_INTRA_OP_NUM_THREADS": str(threads),
+        "ORT_INTER_OP_NUM_THREADS": "1",
+    }
+    for key, val in defaults.items():
+        os.environ.setdefault(key, val)
+    try:
+        import torch  # type: ignore
+
+        torch.set_num_threads(threads)
+    except Exception:  # pragma: no cover - optional dependency
+        pass
+    try:
+        cv2.setNumThreads(threads)
+    except Exception:  # pragma: no cover - optional backend
+        pass
+
+
+def build_session_options(thread_count: int):
+    """Create ONNX Runtime session options honoring thread caps."""
+    try:
+        import onnxruntime as ort  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        return None
+    threads = _normalize_threads(thread_count)
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = threads
+    session_options.inter_op_num_threads = 1
+    return session_options
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
+        "--harvest-dir",
+        type=Path,
+        default=None,
+        help="Directory to store harvested crops (no nested dataset folder).",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/harvest"),
-        help="Directory to store harvested crops",
+        default=None,
+        help=argparse.SUPPRESS,  # backward compatibility shim handled post-parse
     )
     parser.add_argument(
         "--pipeline-config",
@@ -67,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override face detection confidence threshold",
+    )
+    parser.add_argument(
+        "--det-thresh",
+        type=float,
+        default=None,
+        help="Alias for --face-det-threshold (defaults to 0.30 when unset).",
     )
     parser.add_argument(
         "--person-conf",
@@ -104,7 +175,7 @@ def parse_args() -> argparse.Namespace:
         "--samples-per-track",
         type=int,
         default=None,
-        help="Override number of samples to keep per track",
+        help="Override number of samples to keep per track (default 8)",
     )
     parser.add_argument(
         "--min-gap-frames",
@@ -113,10 +184,59 @@ def parse_args() -> argparse.Namespace:
         help="Override temporal gap between selected samples",
     )
     parser.add_argument(
+        "--min-track-frames",
+        type=int,
+        default=None,
+        help="Minimum ByteTrack frames required to keep a track (default 12).",
+    )
+    parser.add_argument(
+        "--new-track-min-frames",
+        type=int,
+        default=None,
+        help="Frames required before confirming a new track (default 3).",
+    )
+    parser.add_argument(
+        "--max-new-tracks-per-sec",
+        type=float,
+        default=None,
+        help="Maximum number of new tracks to confirm per second (default 2).",
+    )
+    parser.add_argument(
+        "--stitch-identities",
+        type=lambda value: bool(strtobool(value)),
+        default=None,
+        metavar="{true,false}",
+        help="Enable post-harvest identity stitching (default true).",
+    )
+    parser.add_argument(
+        "--stitch-sim",
+        type=float,
+        default=None,
+        help="Cosine distance threshold for stitching clusters (default 0.45).",
+    )
+    parser.add_argument(
+        "--stitch-gap-ms",
+        type=float,
+        default=None,
+        help="Maximum allowed gap in milliseconds when stitching (default 8000).",
+    )
+    parser.add_argument(
+        "--stitch-min-iou",
+        type=float,
+        default=None,
+        help="Minimum IoU for stitching adjacency (default 0.1).",
+    )
+    parser.add_argument(
         "--min-frontalness",
         type=float,
         default=None,
         help="Override minimum frontalness required for selection eligibility",
+    )
+    parser.add_argument(
+        "--frontalness-thresh",
+        type=float,
+        default=None,
+        help="Alias for --min-frontalness (defaults to 0.20 when unset).",
     )
     parser.add_argument(
         "--min-sharpness-pct",
@@ -139,7 +259,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fast",
         action="store_true",
-        help="Enable fast mode (stride=2, 640 detector, no debug rejects)",
+        help="Enable fast mode (stride=2, 640 detector, threads=1, disable debug rejects).",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="Override base frame stride before harvest sampling.",
     )
     parser.add_argument(
         "--onnx-providers",
@@ -147,6 +273,29 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="ONNX execution providers (e.g., 'CPUExecutionProvider' or 'CoreMLExecutionProvider CPUExecutionProvider')",
+    )
+    parser.add_argument(
+        "--defer-embeddings",
+        action="store_true",
+        help="Skip ArcFace embeddings during harvest (compute later in clustering/facebank stages).",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Maximum compute threads for math/ONNX libraries (default: 1).",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=1.0,
+        help="Progress log cadence as a percentage of frames processed (default: 1%%).",
+    )
+    parser.add_argument(
+        "--heartbeat-sec",
+        type=float,
+        default=2.0,
+        help="Emit a heartbeat log at this interval in seconds (default: 2s).",
     )
     parser.add_argument(
         "--scene-aware",
@@ -173,6 +322,12 @@ def parse_args() -> argparse.Namespace:
         help="Discard faces smaller than this fraction of the frame area.",
     )
     parser.add_argument(
+        "--min-face",
+        type=int,
+        default=48,
+        help="Minimum face bbox size in pixels for selection (shorter side, default 48).",
+    )
+    parser.add_argument(
         "--cluster-preview",
         action="store_true",
         help="Generate unsupervised identity clusters for harvested candidates (scene-aware mode only).",
@@ -189,16 +344,127 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Minimum samples per cluster for DBSCAN when running --cluster-preview.",
     )
+    parser.add_argument(
+        "--write-candidates",
+        action="store_true",
+        help="Persist intermediate candidate crops under candidates/ (default disabled).",
+    )
+    parser.add_argument(
+        "--recall-pass",
+        dest="recall_pass",
+        action="store_true",
+        default=True,
+        help="Enable relaxed recall pass to backfill missed detections (default on).",
+    )
+    parser.add_argument(
+        "--no-recall-pass",
+        dest="recall_pass",
+        action="store_false",
+        help="Disable the relaxed recall pass.",
+    )
     return parser.parse_args()
+
+def _resolve_existing_path(path_str: str, nested_dir: Path) -> Path:
+    candidate = Path(path_str)
+    candidates = []
+    if candidate.is_absolute():
+        candidates.append(candidate)
+    else:
+        candidates.append((Path.cwd() / candidate).resolve())
+    candidates.append((nested_dir / candidate).resolve())
+    for item in candidates:
+        if item.exists():
+            return item
+    return candidates[0]
+
+
+def _relativize_to_harvest(path_str: str, nested_dir: Path, harvest_dir: Path) -> str:
+    abs_path = _resolve_existing_path(path_str, nested_dir).resolve()
+    try:
+        return abs_path.relative_to(harvest_dir).as_posix()
+    except ValueError:
+        pass
+    try:
+        return abs_path.relative_to(nested_dir).as_posix()
+    except ValueError:
+        pass
+    parts = list(abs_path.parts)
+    for idx, part in enumerate(parts):
+        if part.startswith("track_"):
+            return Path(*parts[idx:]).as_posix()
+    return abs_path.name
+
+
+def migrate_nested_harvest(out_root: Path) -> None:
+    if not out_root.exists():
+        return
+    nested_dirs = [p for p in out_root.iterdir() if p.is_dir() and (p / "manifest.json").exists()]
+    for nested in nested_dirs:
+        LOGGER.info("Flattening nested harvest layout under %s", nested)
+        manifest_path = nested / "manifest.json"
+        if manifest_path.exists():
+            with manifest_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            for entry in data or []:
+                for sample in entry.get("samples", []):
+                    path_str = sample.get("path")
+                    if path_str:
+                        sample["path"] = _relativize_to_harvest(path_str, nested, out_root)
+            target_manifest = out_root / "manifest.json"
+            target_manifest.parent.mkdir(parents=True, exist_ok=True)
+            with target_manifest.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+            manifest_path.unlink(missing_ok=True)
+        selected_csv = nested / "selected_samples.csv"
+        if selected_csv.exists():
+            with selected_csv.open("r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                rows = list(reader)
+                fieldnames = reader.fieldnames or []
+            for row in rows:
+                path_str = row.get("path") or ""
+                if path_str:
+                    row["path"] = _relativize_to_harvest(path_str, nested, out_root)
+                else:
+                    row["path"] = ""
+            target_csv = out_root / "selected_samples.csv"
+            target_csv.parent.mkdir(parents=True, exist_ok=True)
+            with target_csv.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            selected_csv.unlink(missing_ok=True)
+        for item in list(nested.iterdir()):
+            target = out_root / item.name
+            if target.exists():
+                LOGGER.debug("Skipping existing target during migration: %s", target)
+                continue
+            shutil.move(str(item), str(target))
+        try:
+            nested.rmdir()
+        except OSError:
+            LOGGER.debug("Nested directory not empty after migration: %s", nested)
+
 
 
 def run_standard_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
 
+    if args.harvest_dir is not None:
+        harvest_dir = Path(args.harvest_dir)
+    elif args.output_dir is not None:
+        harvest_dir = Path(args.output_dir) / infer_video_stem(args.video)
+    else:
+        harvest_dir = Path("data/harvest") / infer_video_stem(args.video)
+    harvest_dir = harvest_dir.expanduser().resolve()
+    ensure_dir(harvest_dir)
+    migrate_nested_harvest(harvest_dir)
+
     det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(pipeline_cfg.get("det_size", [960, 960]))
-    face_conf = args.face_det_threshold or pipeline_cfg.get("face_conf_th", 0.45)
-    person_conf = args.person_conf or pipeline_cfg.get("person_conf_th", 0.20)
+    det_thresh_arg = args.det_thresh if args.det_thresh is not None else args.face_det_threshold
+    face_conf = float(det_thresh_arg) if det_thresh_arg is not None else 0.30
+    person_conf = float(args.person_conf) if args.person_conf is not None else float(pipeline_cfg.get("person_conf_th", 0.20))
 
     if args.fast and args.retina_det_size is None:
         det_size = (640, 640)
@@ -207,16 +473,15 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         weights=args.person_weights,
         conf_thres=person_conf,
     )
-    
-    # Set ONNX providers for RetinaFace
-    providers = None
-    if args.onnx_providers:
-        providers = tuple(args.onnx_providers)
-    
+
+    providers = tuple(args.onnx_providers) if args.onnx_providers else None
     face_detector = RetinaFaceDetector(
-        det_size=det_size, 
+        det_size=det_size,
         det_thresh=face_conf,
-        providers=providers
+        providers=providers,
+        threads=int(args.threads),
+        session_options=getattr(args, "session_options", None),
+        user_det_size_override=getattr(args, "_retina_size_override", False),
     )
     tracker = ByteTrackWrapper(**tracker_cfg)
 
@@ -230,7 +495,8 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
-    min_frontalness = args.min_frontalness or float(pipeline_cfg.get("min_frontalness", 0.35))
+    frontal_override = args.frontalness_thresh if args.frontalness_thresh is not None else args.min_frontalness
+    min_frontalness = float(frontal_override) if frontal_override is not None else 0.20
     sharpness_pctile = pipeline_cfg.get("sharpness_pctile")
     if sharpness_pctile is None:
         legacy_pct = pipeline_cfg.get("min_sharpness_pct")
@@ -242,12 +508,46 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     dilate_track_px = args.dilate_track_px or float(pipeline_cfg.get("dilate_track_px", 0.07))
     temporal_iou_tolerance = args.temporal_iou_tolerance or int(pipeline_cfg.get("temporal_iou_tolerance", 1))
     min_area_frac = float(pipeline_cfg.get("min_area_frac", 0.005))
-    if hasattr(args, "min_area_frac") and args.min_area_frac is not None:  # future-proof
-        min_area_frac = args.min_area_frac
+    if hasattr(args, "min_area_frac") and args.min_area_frac is not None:
+        min_area_frac = float(args.min_area_frac)
     frontal_pctile = pipeline_cfg.get("frontal_pctile")
     if frontal_pctile is not None:
         frontal_pctile = float(frontal_pctile)
     min_frontal_picks = int(pipeline_cfg.get("min_frontal_picks", 2))
+    min_face_px = int(max(0, args.min_face))
+    progress_fallback_frames = max(1, int(pipeline_cfg.get("progress_fallback_frames", 500)))
+    min_track_frames_value = args.min_track_frames
+    if min_track_frames_value is None:
+        min_track_frames_value = pipeline_cfg.get("min_track_frames", 12)
+    min_track_frames_value = int(min_track_frames_value)
+
+    new_track_min_frames = args.new_track_min_frames
+    if new_track_min_frames is None:
+        new_track_min_frames = pipeline_cfg.get("new_track_min_frames", 3)
+    new_track_min_frames = int(new_track_min_frames)
+
+    max_new_tracks_per_sec = args.max_new_tracks_per_sec
+    if max_new_tracks_per_sec is None:
+        max_new_tracks_per_sec = pipeline_cfg.get("max_new_tracks_per_sec", 2.0)
+    max_new_tracks_per_sec = float(max_new_tracks_per_sec)
+
+    pipeline_stitch_default = _parse_bool_flag(pipeline_cfg.get("stitch_identities"), True)
+    stitch_identities = _parse_bool_flag(args.stitch_identities, pipeline_stitch_default)
+
+    stitch_sim = args.stitch_sim if args.stitch_sim is not None else pipeline_cfg.get("stitch_sim", 0.45)
+    stitch_gap_ms = args.stitch_gap_ms if args.stitch_gap_ms is not None else pipeline_cfg.get("stitch_gap_ms", 8000.0)
+    stitch_min_iou = args.stitch_min_iou if args.stitch_min_iou is not None else pipeline_cfg.get("stitch_min_iou", 0.1)
+    stitch_sim = float(stitch_sim)
+    stitch_gap_ms = float(stitch_gap_ms)
+    stitch_min_iou = float(stitch_min_iou)
+
+    identity_guard_stride = int(pipeline_cfg.get("identity_guard_stride", 6))
+    identity_guard_consecutive = int(pipeline_cfg.get("identity_guard_consecutive", 3))
+    identity_guard_cosine_reject = float(pipeline_cfg.get("identity_guard_cosine_reject", 0.35))
+    identity_guard_enabled = _parse_bool_flag(pipeline_cfg.get("identity_guard"), True)
+    identity_split_enabled = _parse_bool_flag(pipeline_cfg.get("identity_split"), True)
+    identity_sim_threshold = float(pipeline_cfg.get("identity_sim_threshold", 0.55))
+    identity_min_picks = int(pipeline_cfg.get("identity_min_picks", 3))
 
     harvest_config = HarvestConfig(
         stride=pipeline_cfg.get("stride", 1),
@@ -257,6 +557,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         min_gap_frames=min_gap_frames,
         min_area_frac=min_area_frac,
         min_area_px=pipeline_cfg.get("min_area_px"),
+        min_face_px=min_face_px,
         min_sharpness_laplacian=min_sharpness,
         min_sharpness_pct=min_sharpness_pct,
         sharpness_pctile=sharpness_pctile,
@@ -274,24 +575,43 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         multi_face_per_track_guard=pipeline_cfg.get("multi_face_per_track_guard", True),
         multi_face_tiebreak=pipeline_cfg.get("multi_face_tiebreak", "quality"),
         fallback_head_pct=float(pipeline_cfg.get("fallback_head_pct", 0.4)),
-        identity_guard=bool(pipeline_cfg.get("identity_guard", True)),
-        identity_split=bool(pipeline_cfg.get("identity_split", True)),
-        identity_sim_threshold=float(pipeline_cfg.get("identity_sim_threshold", 0.62)),
-        identity_min_picks=int(pipeline_cfg.get("identity_min_picks", 3)),
+        identity_guard=identity_guard_enabled,
+        identity_split=identity_split_enabled,
+        identity_sim_threshold=identity_sim_threshold,
+        identity_min_picks=identity_min_picks,
+        identity_guard_stride=identity_guard_stride,
+        identity_guard_consecutive=identity_guard_consecutive,
+        identity_guard_cosine_reject=identity_guard_cosine_reject,
         reindex_harvest_tracks=bool(pipeline_cfg.get("reindex_harvest_tracks", True)),
         fast_mode=args.fast,
+        min_track_frames=min_track_frames_value,
+        write_candidates=bool(args.write_candidates),
+        recall_pass=bool(args.recall_pass),
+        recall_det_thresh=0.20,
+        recall_face_iou=float(pipeline_cfg.get("recall_face_iou", 0.15)),
+        recall_track_iou=float(pipeline_cfg.get("recall_track_iou", 0.30)),
+        recall_max_gap=int(pipeline_cfg.get("recall_max_gap", 4)),
+        progress_percent_interval=float(args.progress_interval),
+        progress_fallback_frames=progress_fallback_frames,
+        heartbeat_seconds=float(args.heartbeat_sec),
+        defer_embeddings=bool(args.defer_embeddings),
+        threads=int(args.threads),
+        new_track_min_frames=new_track_min_frames,
+        max_new_tracks_per_sec=max_new_tracks_per_sec,
+        stitch_identities=stitch_identities,
+        stitch_sim=stitch_sim,
+        stitch_gap_ms=stitch_gap_ms,
+        stitch_min_iou=stitch_min_iou,
     )
 
-    if args.fast:
+    if args.stride is not None:
+        harvest_config.stride = max(1, int(args.stride))
+    elif args.fast:
         harvest_config.stride = max(2, harvest_config.stride)
-        harvest_config.debug_rejections = False
-
 
     runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
-    ensure_dir(args.output_dir)
-    manifest_path = runner.run(args.video, args.output_dir)
+    manifest_path = runner.run(args.video, harvest_dir)
     LOGGER.info("Harvest manifest written to %s", manifest_path)
-
 
 def run_scene_aware_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
@@ -302,7 +622,22 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         det_size = (640, 640)
 
     providers = tuple(args.onnx_providers) if args.onnx_providers else None
-    face_detector = RetinaFaceDetector(det_size=det_size, det_thresh=face_conf, providers=providers)
+    face_detector = RetinaFaceDetector(
+        det_size=det_size,
+        det_thresh=face_conf,
+        providers=providers,
+        threads=int(args.threads),
+        session_options=getattr(args, "session_options", None),
+        user_det_size_override=getattr(args, "_retina_size_override", False),
+    )
+
+    if args.harvest_dir is not None:
+        out_dir = ensure_dir(Path(args.harvest_dir).expanduser().resolve())
+    elif args.output_dir is not None:
+        out_dir = ensure_dir((Path(args.output_dir) / infer_video_stem(args.video)).expanduser().resolve())
+    else:
+        out_dir = ensure_dir(Path("data/harvest") / infer_video_stem(args.video))
+    migrate_nested_harvest(out_dir)
 
     cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
@@ -330,10 +665,6 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                 LOGGER.warning(
                     "Scene detection found no segments and video length is unavailable; no probes will be sampled."
                 )
-
-        out_root = ensure_dir(args.output_dir)
-        video_stem = infer_video_stem(args.video)
-        out_dir = ensure_dir(out_root / video_stem)
 
         scenes_csv = out_dir / "scenes.csv"
         with scenes_csv.open("w", encoding="utf-8") as fh:
@@ -472,6 +803,7 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
                 eps=max(1e-6, float(args.cluster_eps)),
                 min_samples=max(1, int(args.cluster_min_samples)),
                 provider_overrides=args.onnx_providers,
+                threads=int(args.threads),
             )
         elif args.cluster_preview:
             LOGGER.warning("Cluster preview requested but no candidate crops were written; skipping clustering.")
@@ -485,6 +817,7 @@ def run_cluster_preview(
     eps: float,
     min_samples: int,
     provider_overrides: Optional[list[str]],
+    threads: int,
 ) -> None:
     """Embed harvested candidates and cluster by cosine similarity for quick review."""
     LOGGER.info("Running cluster preview on %d candidate crops.", len(preview_records))
@@ -497,7 +830,7 @@ def run_cluster_preview(
             providers.append("CPUExecutionProvider")
         provider_list = tuple(providers)
 
-    embedder = ArcFaceEmbedder(providers=provider_list)
+    embedder = ArcFaceEmbedder(providers=provider_list, threads=threads)
     embeddings: list[np.ndarray] = []
     kept_records: list[dict[str, object]] = []
 
@@ -677,6 +1010,22 @@ def run_cluster_preview(
 
 def main() -> None:
     args = parse_args()
+    threads_explicit = args.threads is not None
+    args.threads = _normalize_threads(args.threads or 1)
+    args.progress_interval = max(0.1, float(args.progress_interval))
+    args.heartbeat_sec = max(0.1, float(args.heartbeat_sec))
+    args._retina_size_override = args.retina_det_size is not None  # type: ignore[attr-defined]
+
+    if args.fast:
+        if args.retina_det_size is None:
+            args.retina_det_size = [640, 640]
+        if args.stride is None:
+            args.stride = 2
+        if not threads_explicit:
+            args.threads = 1
+
+    configure_threads(args.threads)
+    args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
     setup_logging()
 
     if args.scene_aware:

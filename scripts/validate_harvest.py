@@ -215,7 +215,7 @@ def cluster_embeddings(
 def detect_multi_identity_tracks(
     manifest: Sequence[Dict],
     harvest_dir: Path,
-    distance_threshold: float = 0.45,
+    distance_threshold: float = 0.35,
     min_cluster_size: int = 2,
 ) -> List[int]:
     flagged_tracks: List[int] = []
@@ -437,6 +437,7 @@ def write_reports(
         ],
         "extra_images": [str(path) for path in extra_images],
         "multi_identity_tracks": [int(tid) for tid in aggregate_metrics.get("multi_identity_tracks", [])],
+        "tracks_with_zero_picks": [int(tid) for tid in aggregate_metrics.get("tracks_with_zero_picks", [])],
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as fh:
         json.dump(summary_json, fh, indent=2)
@@ -591,6 +592,8 @@ def main() -> None:
 
     multi_identity_tracks = detect_multi_identity_tracks(manifest, harvest_dir)
     aggregate_metrics["multi_identity_tracks"] = multi_identity_tracks
+    empty_track_ids = [summary.track_id for summary in summaries if summary.sample_count == 0]
+    aggregate_metrics["tracks_with_zero_picks"] = empty_track_ids
 
     print_summary(harvest_dir, summaries, missing_samples, extra_images, aggregate_metrics)
 
@@ -611,7 +614,6 @@ def main() -> None:
         LOGGER.error("Extra image files detected; rerun with --allow-extras to ignore.")
         exit_code = 1
 
-    empty_track_ids = [summary.track_id for summary in summaries if summary.sample_count == 0]
     if empty_track_ids and not args.allow_empty:
         LOGGER.error("Tracks with zero samples detected: %s", empty_track_ids)
         exit_code = 1

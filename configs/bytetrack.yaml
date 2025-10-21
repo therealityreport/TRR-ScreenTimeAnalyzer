@@ -1,7 +1,7 @@
-track_buffer: 600     # Keep tracks alive for ~25 seconds (600 frames @ 24fps) - handles long cutaways in reality TV
-match_thresh: 0.75    # More lenient matching to help re-associate after cutaways
+track_buffer: 90
+match_thresh: 0.70
 conf_thres: 0.1
 fuse_score: true
-track_high_thresh: 0.5
+track_high_thresh: 0.80
 track_low_thresh: 0.1
-new_track_thresh: 0.6
+new_track_thresh: 0.65
