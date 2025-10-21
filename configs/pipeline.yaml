@@ -66,3 +66,9 @@ embed_every_n: 2
 
 # Progress reporting defaults
 progress_fallback_frames: 500
+
+# Sample-based label fallback (uses harvested selected_samples)
+sample_label_fallback_enabled: true
+sample_label_min_votes: 1
+sample_label_min_score: 0.45
+sample_label_window_frames: 45

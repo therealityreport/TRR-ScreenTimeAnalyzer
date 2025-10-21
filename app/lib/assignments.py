@@ -117,3 +117,73 @@ def assign_samples(
                 fh.write(json.dumps(log_entry, ensure_ascii=False) + os.linesep)
 
     return AssignmentResult(copied=copied, skipped=skipped, log_entry=log_entry)
+
+
+def unassign_sample(dest_path: Path, assignments_log: Path, base_dir: Path) -> Optional[Tuple[str, str, str]]:
+    """Remove an assigned facebank image and update the assignments log.
+
+    Returns a tuple of (stem, source_path, person) when a matching entry is removed.
+    """
+
+    if not assignments_log.exists():
+        return None
+
+    dest_resolved = dest_path.resolve()
+    updated_entries: List[dict] = []
+    removed_info: Optional[Tuple[str, str, str]] = None
+
+    with assignments_log.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            files = entry.get("files", [])
+            keep_files = []
+            for file_entry in files:
+                if isinstance(file_entry, dict):
+                    dest_str = file_entry.get("dest") or file_entry.get("destination") or ""
+                    source_str = file_entry.get("source") or ""
+                else:
+                    dest_str = str(file_entry)
+                    source_str = ""
+
+                if not dest_str:
+                    keep_files.append(file_entry)
+                    continue
+
+                candidate = Path(dest_str)
+                if not candidate.is_absolute():
+                    candidate = (base_dir / candidate).resolve()
+                else:
+                    candidate = candidate.resolve()
+
+                if candidate == dest_resolved and removed_info is None:
+                    removed_info = (
+                        entry.get("stem") or "",
+                        source_str,
+                        entry.get("person") or "",
+                    )
+                    continue
+
+                keep_files.append(file_entry)
+
+            if keep_files:
+                entry["files"] = keep_files
+                updated_entries.append(entry)
+            elif removed_info is None:
+                # No match found in this entry; preserve it as-is
+                updated_entries.append(entry)
+
+    if removed_info is None:
+        return None
+
+    with assignments_log.open("w", encoding="utf-8") as fh:
+        for entry in updated_entries:
+            fh.write(json.dumps(entry, ensure_ascii=False) + os.linesep)
+
+    return removed_info

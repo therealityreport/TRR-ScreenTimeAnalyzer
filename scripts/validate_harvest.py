@@ -10,15 +10,18 @@ import logging
 import statistics
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 try:
-    from screentime.recognition.embed_arcface import ArcFaceEmbedder
+    from screentime.recognition.embed_arcface import ArcFaceEmbedder as ArcFaceEmbedderImpl
 except Exception:  # pragma: no cover - optional dependency for validation
-    ArcFaceEmbedder = None  # type: ignore[assignment]
+    ArcFaceEmbedderImpl = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from screentime.recognition.embed_arcface import ArcFaceEmbedder
 
 LOGGER = logging.getLogger("scripts.validate_harvest")
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -219,12 +222,12 @@ def detect_multi_identity_tracks(
     min_cluster_size: int = 2,
 ) -> List[int]:
     flagged_tracks: List[int] = []
-    embedder: Optional[ArcFaceEmbedder]
-    if ArcFaceEmbedder is None:
+    embedder: Optional["ArcFaceEmbedder"]
+    if ArcFaceEmbedderImpl is None:
         embedder = None
     else:
         try:
-            embedder = ArcFaceEmbedder()
+            embedder = ArcFaceEmbedderImpl()
         except Exception as exc:  # pragma: no cover - optional dependency
             LOGGER.warning("ArcFace embedder unavailable (%s); falling back to cosine heuristic.", exc)
             embedder = None

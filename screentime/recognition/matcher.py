@@ -32,6 +32,7 @@ class TrackVotingMatcher:
         identity_split_min_frames: int = 5,
         identity_change_margin: float = 0.08,
         per_label_th: Optional[Dict[str, float]] = None,
+        per_label_floor: Optional[Dict[str, float]] = None,
         min_margin: float = 0.0,
     ) -> None:
         self.facebank = {label: l2_normalize(vec) for label, vec in facebank.items()}
@@ -43,6 +44,7 @@ class TrackVotingMatcher:
         self.identity_split_min_frames = identity_split_min_frames
         self.identity_change_margin = identity_change_margin
         self.per_label_th = per_label_th or {}
+        self.per_label_floor = per_label_floor or {}
         self.min_margin = min_margin
 
     def best_match(self, embedding: np.ndarray) -> Optional[Tuple[str, float]]:
@@ -60,7 +62,9 @@ class TrackVotingMatcher:
         runner_score = scores[1][1] if len(scores) > 1 else float("-inf")
         required = self.per_label_th.get(top_label, self.similarity_th)
         if top_score < required:
-            return None
+            fallback = self.per_label_floor.get(top_label)
+            if fallback is None or top_score < fallback:
+                return None
         if (top_score - runner_score) < self.min_margin:
             return None
         return top_label, top_score

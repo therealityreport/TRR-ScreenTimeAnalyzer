@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import json
 import logging
@@ -13,7 +14,8 @@ from collections import Counter
 import shutil
 from distutils.util import strtobool
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -90,6 +92,14 @@ def _parse_bool_flag(value, default: bool) -> bool:
         return default
 
 
+def _bool_argument(value: str) -> bool:
+    """Argparse helper that accepts common truthy/falsey values."""
+    try:
+        return bool(strtobool(str(value)))
+    except (ValueError, AttributeError) as exc:
+        raise argparse.ArgumentTypeError(f"Expected boolean value, got {value!r}") from exc
+
+
 def _resolve_min_frontalness(args: argparse.Namespace, pipeline_cfg: dict, legacy_default: float = 0.20) -> float:
     """Resolve the minimum frontalness threshold honoring overrides."""
 
@@ -161,6 +171,176 @@ def _compute_scene_positions(sample_count: int, custom: Optional[Sequence[float]
     return np.array(sorted(positions), dtype=float)
 
 
+class HybridFrameSelector:
+    """Determines which frames to process for hybrid scene-guided harvest."""
+
+    def __init__(
+        self,
+        windows: Iterable[Tuple[int, int]],
+        outside_stride: int,
+        total_frames: Optional[int] = None,
+    ) -> None:
+        merged = self._merge_windows(windows, total_frames=total_frames)
+        self.windows: List[Tuple[int, int]] = merged
+        self.starts: List[int] = [start for start, _ in merged]
+        self.outside_stride = max(1, int(outside_stride))
+
+    @staticmethod
+    def _merge_windows(
+        windows: Iterable[Tuple[int, int]],
+        total_frames: Optional[int],
+    ) -> List[Tuple[int, int]]:
+        normalized: List[Tuple[int, int]] = []
+        for start, end in windows:
+            if end < start:
+                start, end = end, start
+            if total_frames is not None:
+                start = max(0, min(start, total_frames - 1))
+                end = max(0, min(end, total_frames - 1))
+            normalized.append((int(start), int(end)))
+        if not normalized:
+            return []
+        normalized.sort()
+        merged: List[Tuple[int, int]] = []
+        cur_start, cur_end = normalized[0]
+        for start, end in normalized[1:]:
+            if start <= cur_end + 1:
+                cur_end = max(cur_end, end)
+            else:
+                merged.append((cur_start, cur_end))
+                cur_start, cur_end = start, end
+        merged.append((cur_start, cur_end))
+        return merged
+
+    def in_roi(self, frame_idx: int) -> bool:
+        if not self.windows:
+            return False
+        pos = bisect.bisect_right(self.starts, int(frame_idx)) - 1
+        if pos < 0:
+            return False
+        start, end = self.windows[pos]
+        return start <= frame_idx <= end
+
+    def should_process(self, frame_idx: int) -> bool:
+        if self.in_roi(frame_idx):
+            return True
+        return int(frame_idx) % self.outside_stride == 0
+
+
+class HybridFaceDetector:
+    """Delegates RetinaFace detection based on frame-level ROI priority."""
+
+    def __init__(
+        self,
+        base_detector: RetinaFaceDetector,
+        selector: HybridFrameSelector,
+        roi_detector: Optional[RetinaFaceDetector] = None,
+        roi_min_score: Optional[float] = None,
+    ) -> None:
+        self._base = base_detector
+        self._selector = selector
+        self._roi = roi_detector
+        self._roi_min_score = roi_min_score
+
+    def detect(self, image: np.ndarray, frame_idx: int):
+        if self._roi is not None and self._selector.in_roi(frame_idx):
+            detections = self._roi.detect(image, frame_idx)
+            if self._roi_min_score is not None:
+                return [det for det in detections if det.score >= self._roi_min_score]
+            return detections
+        return self._base.detect(image, frame_idx)
+
+    @staticmethod
+    def align_to_112(image: np.ndarray, landmarks: Optional[np.ndarray], bbox: Tuple[float, float, float, float]):
+        return RetinaFaceDetector.align_to_112(image, landmarks, bbox)
+
+
+def _seed_hybrid_roi_windows(
+    args: argparse.Namespace,
+    video_path: Path,
+    scenes: List[Tuple[int, int]],
+    detector: RetinaFaceDetector,
+    capture: Optional[cv2.VideoCapture],
+    fps: float,
+    total_frames: Optional[int],
+) -> Tuple[List[Tuple[int, int]], Dict[int, int], int, int]:
+    """Probe representative frames per scene to seed hybrid ROI windows."""
+
+    if not scenes:
+        return [], {}, 0, 0
+
+    fps_hint = float(fps) if fps and fps > 0 else 30.0
+    roi_window_sec = max(0.05, float(args.roi_window_sec))
+    roi_half_frames = max(1, int(round(fps_hint * roi_window_sec)))
+    probe_positions = _compute_scene_positions(max(1, int(args.scene_probes)), args.scene_probe_positions)
+
+    frames_to_probe: List[Tuple[int, int]] = []
+    seen: set[Tuple[int, int]] = set()
+    for scene_idx, (start, end) in enumerate(scenes):
+        if end < start:
+            continue
+        span = max(1, end - start)
+        for pos in probe_positions:
+            frame_idx = int(round(start + pos * span))
+            frame_idx = max(start, min(end, frame_idx))
+            if total_frames is not None and total_frames > 0 and frame_idx >= total_frames:
+                continue
+            key = (scene_idx, frame_idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            frames_to_probe.append(key)
+
+    if not frames_to_probe:
+        return [], {}, 0, len(scenes)
+
+    cap = capture
+    owns_cap = False
+    if cap is None:
+        cap = cv2.VideoCapture(str(video_path))
+        owns_cap = True
+    if cap is None or not cap.isOpened():
+        raise RuntimeError(f"Unable to open video {video_path} for hybrid ROI probing.")
+
+    windows: List[Tuple[int, int]] = []
+    scene_hits: Dict[int, int] = {}
+    anchor_conf = float(args.anchor_min_conf)
+
+    try:
+        for scene_idx, frame_idx in frames_to_probe:
+            start_frame, end_frame = scenes[scene_idx]
+            if end_frame < start_frame:
+                continue
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                LOGGER.warning("Hybrid ROI probe failed to read frame %d for scene %d.", frame_idx, scene_idx)
+                continue
+            detections = detector.detect(frame, frame_idx)
+            anchors = [det for det in detections if det.score >= anchor_conf]
+            if not anchors:
+                continue
+            scene_hits[scene_idx] = scene_hits.get(scene_idx, 0) + 1
+            window_start = max(start_frame, frame_idx - roi_half_frames)
+            window_end = min(end_frame, frame_idx + roi_half_frames)
+            windows.append((window_start, window_end))
+    finally:
+        if owns_cap:
+            cap.release()
+        else:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0.0)
+
+    fallback_count = 0
+    for scene_idx, (start, end) in enumerate(scenes):
+        if end < start:
+            continue
+        if scene_hits.get(scene_idx, 0) == 0:
+            fallback_count += 1
+            windows.append((start, end))
+
+    return windows, scene_hits, len(frames_to_probe), fallback_count
+
+
 def configure_threads(thread_count: int) -> None:
     """Limit math library thread usage to manage thermals."""
     threads = _normalize_threads(thread_count)
@@ -201,7 +381,7 @@ def build_session_options(thread_count: int):
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Harvest aligned face crops from a video episode")
-    parser.set_defaults(scene_aware=None)
+    parser.set_defaults(scene_aware=None, face_only_tracking=None, hybrid_scene=None, hybrid_roi=None)
     parser.add_argument("video", type=Path, help="Path to the input video file")
     parser.add_argument(
         "--harvest-dir",
@@ -240,6 +420,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=None,
         metavar=("WIDTH", "HEIGHT"),
         help="Override RetinaFace detection size (CPU preset uses 640x640 when unset).",
+    )
+    parser.add_argument(
+        "--retina-det-size-roi",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Override RetinaFace detection size for ROI bursts in hybrid scene mode.",
     )
     parser.add_argument(
         "--face-det-threshold",
@@ -323,7 +511,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stitch-identities",
-        type=lambda value: bool(strtobool(value)),
+        type=_bool_argument,
         default=None,
         metavar="{true,false}",
         help="Enable post-harvest identity stitching (default true).",
@@ -411,6 +599,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Disable identity purity guard and split checks (faster but risks mixing identities).",
     )
     parser.add_argument(
+        "--face-only-tracking",
+        dest="face_only_tracking",
+        action="store_true",
+        help="Fallback to face-only tracking when person detections drop (hybrid mode default).",
+    )
+    parser.add_argument(
+        "--no-face-only-tracking",
+        dest="face_only_tracking",
+        action="store_false",
+        help="Disable face-only tracking fallback.",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
         default=None,
@@ -431,14 +631,50 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--scene-aware",
         dest="scene_aware",
-        action="store_true",
+        nargs="?",
+        const=True,
+        default=None,
+        type=_bool_argument,
+        metavar="{true,false}",
         help="Use scene/shot detection and sample a few frames per scene.",
+    )
+    parser.add_argument(
+        "--hybrid-scene",
+        dest="hybrid_scene",
+        nargs="?",
+        const=True,
+        default=None,
+        type=_bool_argument,
+        metavar="{true,false}",
+        help="Run hybrid scene-guided harvest with ROI bursts and dynamic stride.",
     )
     parser.add_argument(
         "--no-scene-aware",
         dest="scene_aware",
         action="store_false",
         help="Force disable scene-aware sampling even when auto-detection would enable it.",
+    )
+    parser.add_argument(
+        "--no-hybrid-scene",
+        dest="hybrid_scene",
+        action="store_false",
+        help="Disable hybrid scene-guided harvest.",
+    )
+    parser.add_argument(
+        "--hybrid-roi",
+        dest="hybrid_roi",
+        nargs="?",
+        const=True,
+        default=None,
+        type=_bool_argument,
+        metavar="{true,false}",
+        help="Enable ROI bursts when hybrid scene mode is active (default true).",
+    )
+    parser.add_argument(
+        "--no-hybrid-roi",
+        dest="hybrid_roi",
+        action="store_false",
+        help="Disable ROI bursts when using --hybrid-scene.",
     )
     parser.add_argument(
         "--no-auto-scene-aware",
@@ -459,6 +695,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Minimum scene length in frames for the content detector.",
     )
     parser.add_argument(
+        "--scene-probes",
+        type=int,
+        default=5,
+        help="How many frames to probe per scene when seeding hybrid ROI bursts.",
+    )
+    parser.add_argument(
         "--scene-samples",
         action=_TrackExplicitInt,
         default=3,
@@ -470,6 +712,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         nargs="+",
         default=None,
         help="Custom normalized positions (0-1) for scene-aware probes; overrides the default staggered pattern.",
+    )
+    parser.add_argument(
+        "--roi-window-sec",
+        type=float,
+        default=1.0,
+        help="Half window size around ROI anchors (seconds) for hybrid scene mode.",
+    )
+    parser.add_argument(
+        "--hybrid-stride-outside",
+        type=int,
+        default=5,
+        help="Frame stride to use outside ROI bursts in hybrid scene mode.",
+    )
+    parser.add_argument(
+        "--anchor-min-conf",
+        type=float,
+        default=0.15,
+        help="Minimum face confidence for ROI anchor seeding in hybrid scene mode.",
     )
     parser.add_argument(
         "--min-face-frac",
@@ -504,6 +764,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--write-candidates",
         action="store_true",
         help="Persist intermediate candidate crops under candidates/ (default disabled).",
+    )
+    parser.add_argument(
+        "--audit-misses",
+        action="store_true",
+        help="Replay harvest with relaxed thresholds and log miss reasons to audit_misses.csv.",
     )
     parser.add_argument(
         "--recall-pass",
@@ -625,8 +890,35 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
     cpu_preset_enabled = _maybe_apply_cpu_preset(args, pipeline_cfg)
+    hybrid_mode = bool(getattr(args, "hybrid_scene", False))
+    raw_hybrid_roi = getattr(args, "hybrid_roi", None)
+    hybrid_roi_enabled = False
+    if hybrid_mode:
+        hybrid_roi_enabled = _parse_bool_flag(raw_hybrid_roi, True)
+    elif raw_hybrid_roi is not None:
+        LOGGER.warning("--hybrid-roi has no effect without --hybrid-scene; ignoring override.")
+    args.hybrid_scene = hybrid_mode
+    args.hybrid_roi = hybrid_roi_enabled
+    if hybrid_mode:
+        pipeline_cfg = dict(pipeline_cfg)
+        pipeline_cfg.update(
+            {
+                "min_frontalness": 0.10,
+                "min_frontal_picks": 0,
+                "allow_face_center": True,
+                "fallback_head_pct": 0.0,
+                "face_in_track_iou": 0.02,
+                "dilate_track_px": 0.35,
+                "temporal_iou_tolerance": 3,
+                "stitch_identities": True,
+                "stitch_sim": 0.45,
+                "stitch_gap_ms": 120000,
+                "stitch_min_iou": 0.02,
+            }
+        )
 
     fps_hint = float(getattr(args, "_video_fps", 0.0) or 0.0)
+    total_frames_hint = int(getattr(args, "_video_frame_count", 0) or 0)
     auto_scene = bool(getattr(args, "_auto_scene_enabled", False))
 
     track_buffer_cfg = tracker_cfg.get("track_buffer")
@@ -667,24 +959,70 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     ensure_dir(harvest_dir)
     migrate_nested_harvest(harvest_dir)
 
+    scenes: List[Tuple[int, int]] = []
+    if hybrid_mode and hybrid_roi_enabled:
+        scenes = detect_scenes(
+            str(args.video),
+            threshold=args.scene_threshold,
+            min_scene_len=args.scene_min_frames,
+        )
+        if not scenes:
+            if total_frames_hint > 0:
+                fallback_scene = (0, max(0, total_frames_hint - 1))
+                scenes = [fallback_scene]
+                LOGGER.warning(
+                    "Hybrid scene mode: scene detection returned no segments; using fallback covering frames %s.",
+                    fallback_scene,
+                )
+            else:
+                LOGGER.warning("Hybrid scene mode: scene detection returned no segments; no ROI windows will be seeded.")
+    elif hybrid_mode:
+        LOGGER.info("Hybrid scene mode active without ROI bursts; skipping scene detection.")
+
     det_size_cfg = pipeline_cfg.get("det_size", [960, 960]) or [960, 960]
-    det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(det_size_cfg)
+    outside_det_size = tuple(args.retina_det_size) if args.retina_det_size else tuple(det_size_cfg)
+    roi_det_size = tuple(args.retina_det_size_roi) if args.retina_det_size_roi else tuple(det_size_cfg)
     det_thresh_arg = args.det_thresh if args.det_thresh is not None else args.face_det_threshold
     face_conf = float(det_thresh_arg) if det_thresh_arg is not None else 0.30
     person_conf = float(args.person_conf) if args.person_conf is not None else float(pipeline_cfg.get("person_conf_th", 0.20))
+    anchor_conf = float(args.anchor_min_conf)
 
+    if hybrid_mode:
+        if args.retina_det_size is None:
+            outside_det_size = (640, 640)
+        if args.retina_det_size_roi is None and hybrid_roi_enabled:
+            roi_det_size = (960, 960)
     if cpu_preset_enabled and args.retina_det_size is None:
-        det_size = (640, 640)
+        outside_det_size = (640, 640)
     elif args.fast and args.retina_det_size is None:
-        det_size = (640, 640)
+        outside_det_size = (640, 640)
+    if not hybrid_mode or not hybrid_roi_enabled:
+        roi_det_size = outside_det_size
     if getattr(args, "_cpu_preset", False):
         stride_for_log = args.stride if args.stride is not None else pipeline_cfg.get("stride", 1)
-        LOGGER.info(
-            "Applying CPU preset: stride=%s, detector=%dx%d. Override with --stride or --retina-det-size.",
-            stride_for_log,
-            det_size[0],
-            det_size[1],
-        )
+        if hybrid_mode and hybrid_roi_enabled:
+            LOGGER.info(
+                "Applying CPU preset: stride=%s, detector_outside=%dx%d, detector_roi=%dx%d.",
+                stride_for_log,
+                outside_det_size[0],
+                outside_det_size[1],
+                roi_det_size[0],
+                roi_det_size[1],
+            )
+        elif hybrid_mode:
+            LOGGER.info(
+                "Applying CPU preset: stride=%s, detector=%dx%d (hybrid ROI disabled).",
+                stride_for_log,
+                outside_det_size[0],
+                outside_det_size[1],
+            )
+        else:
+            LOGGER.info(
+                "Applying CPU preset: stride=%s, detector=%dx%d. Override with --stride or --retina-det-size.",
+                stride_for_log,
+                outside_det_size[0],
+                outside_det_size[1],
+            )
 
     person_detector = YOLOPersonDetector(
         weights=args.person_weights,
@@ -692,15 +1030,76 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     )
 
     providers = tuple(args.onnx_providers) if args.onnx_providers else None
-    face_detector = RetinaFaceDetector(
-        det_size=det_size,
+    base_face_detector = RetinaFaceDetector(
+        det_size=outside_det_size,
         det_thresh=face_conf,
         providers=providers,
         threads=int(args.threads),
         session_options=getattr(args, "session_options", None),
         user_det_size_override=getattr(args, "_retina_size_override", False),
     )
+    roi_face_detector: Optional[RetinaFaceDetector] = None
+    if hybrid_roi_enabled:
+        roi_face_detector = RetinaFaceDetector(
+            det_size=roi_det_size,
+            det_thresh=anchor_conf,
+            providers=providers,
+            threads=int(args.threads),
+            session_options=getattr(args, "session_options", None),
+            user_det_size_override=getattr(args, "_retina_roi_size_override", False),
+        )
     tracker = ByteTrackWrapper(**tracker_cfg)
+
+    hybrid_selector: Optional[HybridFrameSelector] = None
+    frame_selector_callable: Optional[Callable[[int], bool]] = None
+    windows: List[Tuple[int, int]] = []
+    scene_hits: Dict[int, int] = {}
+    probe_count = 0
+    fallback_count = 0
+    if hybrid_mode:
+        if hybrid_roi_enabled:
+            capture_for_seed = cap if cap is not None else getattr(args, "_capture", None)
+            windows, scene_hits, probe_count, fallback_count = _seed_hybrid_roi_windows(
+                args=args,
+                video_path=Path(args.video),
+                scenes=scenes,
+                detector=roi_face_detector or base_face_detector,
+                capture=capture_for_seed,
+                fps=fps_hint,
+                total_frames=total_frames_hint if total_frames_hint > 0 else None,
+            )
+        hybrid_selector = HybridFrameSelector(
+            windows,
+            outside_stride=max(1, int(args.hybrid_stride_outside)),
+            total_frames=total_frames_hint if total_frames_hint > 0 else None,
+        )
+        frame_selector_callable = hybrid_selector.should_process
+        face_detector_impl = HybridFaceDetector(
+            base_face_detector,
+            hybrid_selector,
+            roi_detector=roi_face_detector if hybrid_roi_enabled else None,
+            roi_min_score=face_conf if hybrid_roi_enabled else None,
+        )
+        if hybrid_roi_enabled:
+            LOGGER.info(
+                "Hybrid scene seeding: scenes=%d probes=%d anchors=%d fallback_full=%d roi_windows=%d stride_out=%d",
+                len(scenes),
+                probe_count,
+                sum(scene_hits.values()) if scene_hits else 0,
+                fallback_count,
+                len(hybrid_selector.windows),
+                int(args.hybrid_stride_outside),
+            )
+        else:
+            LOGGER.info(
+                "Hybrid scene mode without ROI bursts: stride_out=%d (uniform), ROI windows disabled.",
+                int(args.hybrid_stride_outside),
+            )
+    else:
+        face_detector_impl = base_face_detector
+    face_only_tracking_flag = args.face_only_tracking
+    if face_only_tracking_flag is None:
+        face_only_tracking_flag = True if hybrid_mode else False
 
     quality_weights_cfg = args.quality_weights or pipeline_cfg.get("quality_weights", (0.5, 0.3, 0.2))
     quality_weights = tuple(float(x) for x in quality_weights_cfg)
@@ -710,6 +1109,8 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
         cfg_min_sharpness = pipeline_cfg.get("min_sharpness_laplacian")
         min_sharpness = float(cfg_min_sharpness) if cfg_min_sharpness is not None else None
     face_in_track_iou = args.face_in_track_iou or float(pipeline_cfg.get("face_in_track_iou", 0.25))
+    face_only_iou = float(pipeline_cfg.get("face_only_iou", HarvestConfig.face_only_iou))
+    face_only_max_gap = int(pipeline_cfg.get("face_only_max_gap", HarvestConfig.face_only_max_gap))
     samples_per_track = args.samples_per_track or int(pipeline_cfg.get("samples_per_track", 8))
     min_gap_frames = args.min_gap_frames or int(pipeline_cfg.get("min_gap_frames", 8))
     min_frontalness = _resolve_min_frontalness(args, pipeline_cfg)
@@ -862,6 +1263,10 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
         stitch_sim=stitch_sim,
         stitch_gap_ms=stitch_gap_ms,
         stitch_min_iou=stitch_min_iou,
+        face_only_tracking=bool(face_only_tracking_flag),
+        face_only_iou=float(face_only_iou),
+        face_only_max_gap=int(face_only_max_gap),
+        frame_selector=frame_selector_callable,
     )
 
     if args.stride is not None:
@@ -869,10 +1274,163 @@ def run_standard_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCaptur
     elif args.fast:
         harvest_config.stride = max(2, harvest_config.stride)
 
-    runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
+    runner = HarvestRunner(person_detector, face_detector_impl, tracker, harvest_config)
     capture = cap if cap is not None else getattr(args, "_capture", None)
     manifest_path = runner.run(args.video, output_root, legacy_layout=legacy_layout, cap=capture)
     LOGGER.info("Harvest manifest written to %s", manifest_path)
+
+    if args.audit_misses:
+        LOGGER.info("Running audit-miss analysis with face threshold %.2f", min(face_conf, anchor_conf))
+
+        def _format_bbox(bbox: Optional[Iterable[float]]) -> str:
+            if not bbox:
+                return ""
+            try:
+                return ",".join(f"{float(coord):.1f}" for coord in bbox)
+            except Exception:
+                return str(bbox)
+
+        def _events_to_rows(events: Dict[int, List[Dict[str, object]]], fps_value: float) -> List[Dict[str, object]]:
+            reason_map = {
+                "rejected_low_iou": "person_iou_fail",
+                "rejected_frontalness": "frontalness_gate",
+                "rejected_area": "size_gate",
+                "rejected_sharpness": "sharpness_gate",
+                "rejected_multi_face": "multi_face_guard",
+                "rejected_identity_guard": "identity_guard",
+            }
+            rows: List[Dict[str, object]] = []
+            excluded = {
+                "frame",
+                "track_id",
+                "byte_track_id",
+                "reason",
+                "path",
+                "match_mode",
+                "face_bbox",
+                "person_bbox",
+                "score",
+                "association_iou",
+                "frontalness",
+                "quality",
+                "area_frac",
+            }
+            for frame_idx in sorted(events.keys()):
+                for event in events[frame_idx]:
+                    reason = event.get("reason")
+                    if not isinstance(reason, str) or not reason.startswith("rejected"):
+                        continue
+                    friendly = reason_map.get(reason, reason.replace("rejected_", ""))
+                    row: Dict[str, object] = {
+                        "frame": int(frame_idx),
+                        "timestamp_ms": float((frame_idx / fps_value) * 1000.0) if fps_value > 0 else "",
+                        "reason": friendly,
+                        "raw_reason": reason,
+                        "track_id": event.get("track_id"),
+                        "byte_track_id": event.get("byte_track_id"),
+                        "match_mode": event.get("match_mode"),
+                        "score": event.get("score"),
+                        "association_iou": event.get("association_iou"),
+                        "frontalness": event.get("frontalness"),
+                        "area_frac": event.get("area_frac"),
+                        "face_bbox": _format_bbox(event.get("face_bbox")),
+                        "person_bbox": _format_bbox(event.get("person_bbox")),
+                    }
+                    details = {k: v for k, v in event.items() if k not in excluded}
+                    row["details"] = json.dumps(details, sort_keys=True) if details else ""
+                    rows.append(row)
+            return rows
+
+        audit_face_conf = min(face_conf, anchor_conf)
+        audit_base_face_detector = RetinaFaceDetector(
+            det_size=outside_det_size,
+            det_thresh=audit_face_conf,
+            providers=providers,
+            threads=int(args.threads),
+            session_options=getattr(args, "session_options", None),
+            user_det_size_override=getattr(args, "_retina_size_override", False),
+        )
+        audit_roi_face_detector: Optional[RetinaFaceDetector] = None
+        if hybrid_mode and roi_face_detector is not None:
+            audit_roi_face_detector = RetinaFaceDetector(
+                det_size=roi_det_size,
+                det_thresh=audit_face_conf,
+                providers=providers,
+                threads=int(args.threads),
+                session_options=getattr(args, "session_options", None),
+                user_det_size_override=getattr(args, "_retina_roi_size_override", False),
+            )
+        if hybrid_mode and hybrid_selector is not None:
+            audit_face_detector_impl = HybridFaceDetector(
+                audit_base_face_detector,
+                hybrid_selector,
+                roi_detector=audit_roi_face_detector,
+                roi_min_score=audit_face_conf,
+            )
+        else:
+            audit_face_detector_impl = audit_base_face_detector
+
+        audit_tracker = ByteTrackWrapper(**tracker_cfg)
+        audit_config = replace(
+            harvest_config,
+            audit_mode=True,
+            write_candidates=False,
+            debug_rejections=True,
+            collect_events=True,
+        )
+
+        audit_runner = HarvestRunner(person_detector, audit_face_detector_impl, audit_tracker, audit_config)
+        audit_cap = cv2.VideoCapture(str(args.video))
+        audit_rows: List[Dict[str, object]] = []
+        try:
+            if not audit_cap.isOpened():
+                LOGGER.warning("Audit pass skipped: unable to open %s", args.video)
+            else:
+                audit_runner.run(args.video, output_root, legacy_layout=legacy_layout, cap=audit_cap)
+                audit_rows = _events_to_rows(getattr(audit_runner, "last_frame_events", {}), fps_hint)
+        finally:
+            audit_cap.release()
+
+        audit_csv = harvest_dir / "audit_misses.csv"
+        fieldnames = [
+            "frame",
+            "timestamp_ms",
+            "reason",
+            "raw_reason",
+            "track_id",
+            "byte_track_id",
+            "match_mode",
+            "score",
+            "association_iou",
+            "frontalness",
+            "area_frac",
+            "face_bbox",
+            "person_bbox",
+            "details",
+        ]
+        summary_row = {
+            "frame": "",
+            "timestamp_ms": "",
+            "reason": "summary",
+            "raw_reason": "",
+            "track_id": "",
+            "byte_track_id": "",
+            "match_mode": "",
+            "score": "",
+            "association_iou": "",
+            "frontalness": "",
+            "area_frac": "",
+            "face_bbox": "",
+            "person_bbox": "",
+            "details": f"misses={len(audit_rows)}",
+        }
+        output_rows = list(audit_rows) + [summary_row]
+
+        with audit_csv.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(output_rows)
+        LOGGER.info("Audit misses report written to %s (rows=%d)", audit_csv, len(audit_rows))
 
 def run_scene_aware_harvest(args: argparse.Namespace, cap: Optional[cv2.VideoCapture] = None) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
@@ -1301,11 +1859,16 @@ def run_cluster_preview(
 
 def main() -> None:
     args = parse_args()
+    if args.hybrid_scene and args.scene_aware:
+        raise SystemExit("Cannot combine --hybrid-scene with --scene-aware.")
+    if args.hybrid_scene:
+        args.scene_aware = False
     threads_explicit = args.threads is not None
     args.threads = _normalize_threads(args.threads or 1)
     args.progress_interval = max(0.1, float(args.progress_interval))
     args.heartbeat_sec = max(0.1, float(args.heartbeat_sec))
     args._retina_size_override = args.retina_det_size is not None  # type: ignore[attr-defined]
+    args._retina_roi_size_override = args.retina_det_size_roi is not None  # type: ignore[attr-defined]
     args._cpu_preset = False  # type: ignore[attr-defined]
 
     cap = cv2.VideoCapture(str(args.video))
@@ -1324,17 +1887,7 @@ def main() -> None:
 
     auto_scene_enabled = False
     if args.scene_aware is None:
-        enable_auto = not getattr(args, "no_auto_scene_aware", False)
-        if enable_auto and duration_sec > 0 and duration_sec <= float(args.scene_auto_threshold_sec):
-            args.scene_aware = True
-            auto_scene_enabled = True
-            LOGGER.info(
-                "Auto-enabling scene-aware harvest for %.1fs clip (threshold %.1fs).",
-                duration_sec,
-                float(args.scene_auto_threshold_sec),
-            )
-        else:
-            args.scene_aware = False
+        args.scene_aware = False
     setattr(args, "_auto_scene_enabled", auto_scene_enabled)
 
     samples_per_sec = args.samples_per_sec
@@ -1367,7 +1920,11 @@ def main() -> None:
         args.session_options = build_session_options(args.threads)  # type: ignore[attr-defined]
         setup_logging()
 
-        if args.scene_aware:
+        if args.hybrid_scene:
+            if not args.person_weights:
+                raise SystemExit("--person-weights is required for --hybrid-scene.")
+            run_standard_harvest(args, cap=cap)
+        elif args.scene_aware:
             run_scene_aware_harvest(args, cap=cap)
         else:
             if not args.person_weights:

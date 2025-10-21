@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import os
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
@@ -35,7 +37,182 @@ PER_LABEL_SIMILARITY_TH_OVERRIDES = {
     "KIM": 0.56,
     "BRANDI": 0.55,
 }
+PER_LABEL_SIMILARITY_FLOOR = {
+    "LVP": 0.08,
+    "BRANDI": 0.08,
+}
 DEFAULT_MIN_MARGIN = 0.0
+
+SAMPLE_LABEL_FALLBACK_ENABLED = True
+SAMPLE_LABEL_MIN_VOTES_DEFAULT = 1
+SAMPLE_LABEL_MIN_SCORE_DEFAULT = 0.45
+SAMPLE_LABEL_WINDOW_FRAMES_DEFAULT = 45
+
+
+def _infer_sample_votes(
+    samples_csv: Path,
+    embedder: ArcFaceEmbedder,
+    facebank: Dict[str, np.ndarray],
+    logger: logging.Logger,
+) -> Dict[int, Dict]:
+    """Predict identity votes for each track using harvested selected samples."""
+    if not samples_csv.exists():
+        logger.debug("Sample fallback skipped: %s not found", samples_csv)
+        return {}
+
+    try:
+        samples_df = pd.read_csv(samples_csv)
+    except Exception as exc:  # pragma: no cover - IO best effort
+        logger.warning("Unable to read selected_samples.csv (%s): %s", samples_csv, exc)
+        return {}
+
+    if samples_df.empty:
+        logger.debug("Sample fallback skipped: %s empty", samples_csv)
+        return {}
+
+    picked_col = samples_df.get("picked")
+    if picked_col is not None:
+        if picked_col.dtype == bool:
+            samples_df = samples_df[picked_col]
+        else:
+            samples_df = samples_df[picked_col.astype(str).str.lower() == "true"]
+
+    if samples_df.empty:
+        logger.debug("Sample fallback skipped: no picked samples in %s", samples_csv)
+        return {}
+
+    votes: Dict[int, Dict] = {}
+    for track_id, group in samples_df.groupby("byte_track_id"):
+        sample_records: List[Tuple[int, str, float]] = []
+        label_scores: Dict[str, List[float]] = defaultdict(list)
+        for _, row in group.iterrows():
+            frame_val = row.get("frame")
+            if frame_val is None or not np.isfinite(frame_val):
+                continue
+            frame_idx = int(frame_val)
+            path_val = row.get("path")
+            if not path_val:
+                continue
+            img_path = Path(path_val)
+            if not img_path.is_absolute():
+                img_path = samples_csv.parent / img_path
+            image = cv2.imread(str(img_path))
+            if image is None:
+                continue
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            try:
+                aligned = cv2.resize(image, (112, 112))
+            except Exception:
+                continue
+            embedding = embedder.embed(aligned)
+            embedding = embedding / np.linalg.norm(embedding)
+            best_label: Optional[str] = None
+            best_score = float("-inf")
+            for label, vec in facebank.items():
+                score = float(np.dot(vec, embedding))
+                if score > best_score:
+                    best_label = label
+                    best_score = score
+            if best_label is None:
+                continue
+            sample_records.append((frame_idx, best_label, best_score))
+            label_scores[best_label].append(best_score)
+        if sample_records:
+            votes[int(track_id)] = {
+                "samples": sample_records,
+                "label_scores": {label: scores for label, scores in label_scores.items()},
+            }
+    if votes:
+        logger.debug(
+            "Sample fallback collected votes for %d tracks from %s",
+            len(votes),
+            samples_csv,
+        )
+    else:
+        logger.debug("Sample fallback produced no votes from %s", samples_csv)
+    return votes
+
+
+def _apply_sample_votes_to_tracks(
+    tracks: Sequence[TrackState],
+    votes: Dict[int, Dict],
+    frame_annotations: Dict[int, List[Dict]],
+    window_frames: int,
+    min_votes: int,
+    min_score: float,
+) -> Dict[int, Dict[str, Dict[str, float]]]:
+    """Inject sample-based label votes into track label_scores."""
+    if not votes:
+        return {}
+
+    track_lookup: Dict[int, TrackState] = {track.track_id: track for track in tracks}
+    applied: Dict[int, Dict[str, Dict[str, float]]] = {}
+
+    for track_id, payload in votes.items():
+        track = track_lookup.get(track_id)
+        if track is None or not track.frames:
+            continue
+        samples: List[Tuple[int, str, float]] = payload.get("samples", [])
+        if not samples:
+            continue
+
+        frames_sorted = sorted(track.frames)
+        frame_set = set(frames_sorted)
+        if not frame_set:
+            continue
+
+        label_groups: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
+        for frame_idx, label, score in samples:
+            if frame_idx not in frame_set:
+                continue
+            label_groups[label].append((frame_idx, score))
+            track.face_matches[frame_idx] = (label, score)
+
+        if not label_groups:
+            continue
+
+        applied_labels: Dict[str, Dict[str, float]] = {}
+
+        for label, label_samples in label_groups.items():
+            vote_count = len(label_samples)
+            mean_score = float(sum(score for _, score in label_samples) / vote_count)
+
+            if vote_count < max(1, min_votes):
+                continue
+            if mean_score < min_score:
+                continue
+
+            sample_frames = sorted(frame for frame, _ in label_samples)
+            start_frame = max(frames_sorted[0], sample_frames[0] - window_frames)
+            end_frame = min(frames_sorted[-1], sample_frames[-1] + window_frames)
+
+            for frame_idx in frames_sorted:
+                if frame_idx < start_frame or frame_idx > end_frame:
+                    continue
+                if frame_idx in track.label_scores:
+                    continue
+                track.add_label(frame_idx, label, mean_score)
+                boxes = frame_annotations.get(frame_idx)
+                if boxes:
+                    for box in boxes:
+                        if (
+                            box.get("track_id") == track_id
+                            and (not box.get("label") or box.get("label") == "UNKNOWN")
+                        ):
+                            box["label"] = label
+                            box["score"] = mean_score
+                            break
+
+            track.label_votes[label] = track.label_votes.get(label, 0.0) + (mean_score * vote_count)
+            applied_labels[label] = {
+                "votes": float(vote_count),
+                "mean_score": mean_score,
+            }
+
+        if applied_labels:
+            applied[track_id] = applied_labels
+
+    return applied
 
 
 def parse_args() -> argparse.Namespace:
@@ -246,6 +423,7 @@ def main() -> None:
         identity_split_min_frames=identity_split_min_frames,
         identity_change_margin=identity_change_margin,
         per_label_th=per_label_th,
+        per_label_floor=PER_LABEL_SIMILARITY_FLOOR,
         min_margin=min_margin,
     )
 
@@ -374,11 +552,18 @@ def main() -> None:
                 if frame_idx - state.last_embed_frame < embed_every_n:
                     should_embed = False
             if should_embed:
+                align_kwargs: Dict[str, object] = {}
+                if getattr(face_detector, "force_bbox_alignment", False):
+                    try:
+                        if "force_bbox" in inspect.signature(face_detector.align_to_112).parameters:
+                            align_kwargs["force_bbox"] = True
+                    except (ValueError, TypeError):
+                        pass
                 aligned = face_detector.align_to_112(
                     frame,
                     face.landmarks,
                     face.bbox,
-                    force_bbox=getattr(face_detector, "force_bbox_alignment", False),
+                    **align_kwargs,
                 )
                 embedding = embedder.embed(aligned)
                 match = matcher.best_match(embedding)
@@ -422,6 +607,31 @@ def main() -> None:
 
     cap.release()
     tracks = accumulator.flush()
+
+    sample_votes: Dict[int, Dict[str, Dict[str, float]]] = {}
+    if pipeline_cfg.get("sample_label_fallback_enabled", SAMPLE_LABEL_FALLBACK_ENABLED):
+        samples_csv = Path("data/harvest") / video_stem / "selected_samples.csv"
+        sample_window = int(pipeline_cfg.get("sample_label_window_frames", SAMPLE_LABEL_WINDOW_FRAMES_DEFAULT))
+        sample_min_votes = int(pipeline_cfg.get("sample_label_min_votes", SAMPLE_LABEL_MIN_VOTES_DEFAULT))
+        sample_min_score = float(pipeline_cfg.get("sample_label_min_score", SAMPLE_LABEL_MIN_SCORE_DEFAULT))
+        sample_vote_payload = _infer_sample_votes(samples_csv, embedder, facebank_embeddings, LOGGER)
+        if sample_vote_payload:
+            sample_votes = _apply_sample_votes_to_tracks(
+                tracks,
+                sample_vote_payload,
+                frame_annotations,
+                window_frames=sample_window,
+                min_votes=sample_min_votes,
+                min_score=sample_min_score,
+            )
+            if sample_votes:
+                LOGGER.info(
+                    "Sample fallback added label hints for %d tracks (window=%d, min_votes=%d, min_score=%.2f)",
+                    len(sample_votes),
+                    sample_window,
+                    sample_min_votes,
+                    sample_min_score,
+                )
 
     if last_frames_seen:
         if last_frames_seen < next_progress_log:

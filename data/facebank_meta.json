@@ -9,13 +9,13 @@
     "YOLANDA"
   ],
   "counts": {
-    "BRANDI": 10,
-    "EILEEN": 14,
-    "KIM": 48,
-    "KYLE": 16,
-    "LVP": 8,
-    "RINNA": 29,
-    "YOLANDA": 11
+    "BRANDI": 64,
+    "EILEEN": 45,
+    "KIM": 138,
+    "KYLE": 50,
+    "LVP": 48,
+    "RINNA": 57,
+    "YOLANDA": 59
   },
   "num_labels": 7
 }

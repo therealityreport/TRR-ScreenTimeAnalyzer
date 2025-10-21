@@ -7,7 +7,7 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -17,7 +17,7 @@ from screentime.detectors.face_retina import RetinaFaceDetector
 from screentime.detectors.person_yolo import YOLOPersonDetector
 from screentime.io_utils import dump_json, ensure_dir, infer_video_stem
 from screentime.tracking.bytetrack_wrap import ByteTrackWrapper, TrackAccumulator, TrackObservation
-from screentime.types import FaceSample, ManifestEntry, TrackState, bbox_area, iou
+from screentime.types import Detection, FaceSample, ManifestEntry, TrackState, bbox_area, iou
 from screentime.recognition.embed_arcface import ArcFaceEmbedder
 
 LOGGER = logging.getLogger("screentime.harvest")
@@ -83,6 +83,12 @@ class HarvestConfig:
     stitch_sim: float = 0.45
     stitch_gap_ms: float = 8000.0
     stitch_min_iou: float = 0.1
+    face_only_tracking: bool = False
+    face_only_iou: float = 0.4
+    face_only_max_gap: int = 6
+    frame_selector: Optional[Callable[[int], bool]] = None
+    collect_events: bool = False
+    audit_mode: bool = False
 
 
 @dataclass
@@ -237,6 +243,19 @@ class TrackSamplingState:
                 if len(selected) >= min(config.samples_min, required):
                     break
 
+        target_slots = min(config.samples_per_track, len(sorted_candidates))
+
+        if profile_candidates and len(selected) < target_slots:
+            for candidate in sorted_candidates:
+                if candidate.picked or candidate.reason != "rejected_sharpness":
+                    continue
+                if all(abs(candidate.sample.frame_idx - chosen.sample.frame_idx) >= min_gap for chosen in selected):
+                    candidate.picked = True
+                    candidate.reason = "picked"
+                    selected.append(candidate)
+                    if len(selected) >= required:
+                        break
+
         frontal_threshold: Optional[float] = None
         if config.frontal_pctile is not None and eligible_candidates:
             frontal_threshold = float(
@@ -301,6 +320,109 @@ class TrackSamplingState:
             }
 
 
+class FaceOnlyTracker:
+    """Maintains simple IOU-based continuity for faces when person tracks drop out."""
+
+    def __init__(self, iou_thresh: float = 0.4, max_gap: int = 6, start_id: int = 1_000_000) -> None:
+        self.iou_thresh = float(max(0.0, min(1.0, iou_thresh)))
+        self.max_gap = max(1, int(max_gap))
+        self.next_id = int(start_id)
+        self.tracks: Dict[int, Dict[str, Any]] = {}
+
+    def _expire(self, frame_idx: int) -> None:
+        for tid in list(self.tracks.keys()):
+            last_frame = self.tracks[tid]["last_frame"]
+            if frame_idx - last_frame > self.max_gap:
+                self.tracks.pop(tid, None)
+
+    def _drop_overlaps(self, bboxes: Sequence[BBox]) -> None:
+        if not bboxes:
+            return
+        for tid in list(self.tracks.keys()):
+            bbox = self.tracks[tid]["bbox"]
+            if any(iou(bbox, other) >= self.iou_thresh for other in bboxes):
+                self.tracks.pop(tid, None)
+
+    def update(
+        self,
+        frame_idx: int,
+        timestamp_ms: float,
+        faces: Sequence[Detection],
+        existing_bboxes: Sequence[BBox],
+    ) -> List[TrackObservation]:
+        self._expire(frame_idx)
+        self._drop_overlaps(existing_bboxes)
+
+        if not faces:
+            return []
+
+        available: List[Detection] = []
+        for det in faces:
+            if any(iou(det.bbox, bbox) >= self.iou_thresh for bbox in existing_bboxes):
+                continue
+            available.append(det)
+
+        if not available:
+            return []
+
+        track_ids = list(self.tracks.keys())
+        outputs: List[TrackObservation] = []
+        unmatched_faces: set[int] = set(range(len(available)))
+
+        if track_ids:
+            cost = np.full((len(track_ids), len(available)), fill_value=1.0, dtype=np.float32)
+            for i, tid in enumerate(track_ids):
+                prev_bbox = self.tracks[tid]["bbox"]
+                for j, det in enumerate(available):
+                    overlap = iou(prev_bbox, det.bbox)
+                    if overlap >= self.iou_thresh:
+                        cost[i, j] = 1.0 - overlap
+            if np.any(cost < 1.0):
+                row_ind, col_ind = linear_sum_assignment(cost)
+                for r, c in zip(row_ind, col_ind):
+                    overlap = 1.0 - cost[r, c]
+                    if overlap < self.iou_thresh:
+                        continue
+                    tid = track_ids[r]
+                    det = available[c]
+                    self.tracks[tid].update(
+                        {
+                            "bbox": det.bbox,
+                            "last_frame": frame_idx,
+                            "timestamp_ms": timestamp_ms,
+                            "score": float(det.score),
+                        }
+                    )
+                    outputs.append(
+                        TrackObservation(
+                            track_id=tid,
+                            bbox=det.bbox,
+                            score=float(det.score),
+                        )
+                    )
+                    unmatched_faces.discard(c)
+
+        for idx in sorted(unmatched_faces):
+            det = available[idx]
+            tid = self.next_id
+            self.next_id += 1
+            self.tracks[tid] = {
+                "bbox": det.bbox,
+                "last_frame": frame_idx,
+                "timestamp_ms": timestamp_ms,
+                "score": float(det.score),
+            }
+            outputs.append(
+                TrackObservation(
+                    track_id=tid,
+                    bbox=det.bbox,
+                    score=float(det.score),
+                )
+            )
+
+        return outputs
+
+
 class HarvestRunner:
     """High-level pipeline controller for harvesting aligned crops."""
 
@@ -318,6 +440,8 @@ class HarvestRunner:
         self.config = config
         # ArcFace embedder for identity consistency checks (lazy)
         self.embedder = embedder
+        self.last_frame_events: Dict[int, List[Dict[str, Any]]] = {}
+        self.last_reject_counter: Dict[str, int] = {}
 
     def run(
         self,
@@ -385,6 +509,14 @@ class HarvestRunner:
             cv2.imwrite(str(candidate_path), image)
 
         accumulator = TrackAccumulator()
+        face_only_tracker = (
+            FaceOnlyTracker(
+                iou_thresh=self.config.face_only_iou,
+                max_gap=self.config.face_only_max_gap,
+            )
+            if self.config.face_only_tracking
+            else None
+        )
         sampling_states: Dict[int, TrackSamplingState] = {}
         debug_records: Dict[str, List[Dict]] = defaultdict(list)
         reject_counter: Counter[str] = Counter()
@@ -418,6 +550,11 @@ class HarvestRunner:
         ) -> None:
             track_id = sample.track_id
             byte_id = sample.byte_track_id
+            if self.config.audit_mode:
+                payload = dict(payload)
+                payload["path"] = None
+                record_candidate_event(track_id, sample.frame_idx, payload)
+                return
             harvest_dirname = _harvest_dirname(track_id, byte_id)
             sample_filename = f"{video_stem}_f{sample.frame_idx:06d}.jpg"
             sample_path = crops_dir / harvest_dirname / sample_filename
@@ -477,9 +614,16 @@ class HarvestRunner:
             selection_map: Dict[int, List[FaceSample]],
             track_by_id: Dict[int, TrackState],
             harvest_source: Dict[int, int],
-        ) -> Tuple[Dict[int, List[FaceSample]], Dict[int, TrackState], Dict[int, int], Dict[int, int]]:
+        ) -> Tuple[
+            Dict[int, List[FaceSample]],
+            Dict[int, TrackState],
+            Dict[int, int],
+            Dict[int, int],
+            List[Dict[str, Any]],
+        ]:
+            group_payloads: List[Dict[str, Any]] = []
             if not self.config.stitch_identities:
-                return selection_map, track_by_id, harvest_source, {}
+                return selection_map, track_by_id, harvest_source, {}, group_payloads
 
             track_infos: List[Dict[str, Any]] = []
             for track_id, samples in selection_map.items():
@@ -542,7 +686,7 @@ class HarvestRunner:
                 )
 
             if not track_infos:
-                return selection_map, track_by_id, harvest_source, {}
+                return selection_map, track_by_id, harvest_source, {}, group_payloads
 
             track_infos.sort(key=lambda info: info["start_ms"])
             used: set[int] = set()
@@ -583,7 +727,7 @@ class HarvestRunner:
                 groups.append(group)
 
             if not groups:
-                return selection_map, track_by_id, harvest_source, {}
+                return selection_map, track_by_id, harvest_source, {}, group_payloads
 
             for idx, group in enumerate(groups):
                 if len(group) <= 1:
@@ -613,7 +757,7 @@ class HarvestRunner:
                 merged_states: List[TrackState] = []
                 byte_id: Optional[int] = None
 
-                group.sort(key=lambda info: info["start_ms"])
+                group.sort(key=lambda info: info["start_ms"]) 
                 for info in group:
                     merged_samples.extend(info["samples"])
                     state = track_by_id.get(info["track_id"])
@@ -642,7 +786,49 @@ class HarvestRunner:
                 if byte_id is not None:
                     new_harvest_source[new_id] = byte_id
 
-            return new_selection, new_track_states, new_harvest_source, id_map
+                component_info: List[Dict[str, Any]] = []
+                component_track_ids: List[int] = []
+                component_byte_ids: List[int] = []
+                for info in group:
+                    component_track_ids.append(int(info["track_id"]))
+                    if info.get("byte_id") is not None:
+                        component_byte_ids.append(int(info["byte_id"]))
+                    component_info.append(
+                        {
+                            "track_id": int(info["track_id"]),
+                            "byte_track_id": int(info["byte_id"]) if info.get("byte_id") is not None else None,
+                            "start_ms": float(info["start_ms"]),
+                            "end_ms": float(info["end_ms"]),
+                        }
+                    )
+                start_frame = merged_state.frames[0] if merged_state.frames else None
+                end_frame = merged_state.frames[-1] if merged_state.frames else None
+                start_ms_val = (
+                    merged_state.timestamps_ms[0]
+                    if merged_state.timestamps_ms
+                    else group[0]["start_ms"]
+                )
+                end_ms_val = (
+                    merged_state.timestamps_ms[-1]
+                    if merged_state.timestamps_ms
+                    else group[-1]["end_ms"]
+                )
+                final_byte_id = new_harvest_source.get(new_id)
+                group_payloads.append(
+                    {
+                        "track_id": int(new_id),
+                        "component_track_ids": component_track_ids,
+                        "component_byte_track_ids": component_byte_ids,
+                        "byte_track_id": int(final_byte_id) if final_byte_id is not None else None,
+                        "start_frame": int(start_frame) if start_frame is not None else None,
+                        "end_frame": int(end_frame) if end_frame is not None else None,
+                        "start_ms": float(start_ms_val),
+                        "end_ms": float(end_ms_val),
+                        "components": component_info,
+                    }
+                )
+
+            return new_selection, new_track_states, new_harvest_source, id_map, group_payloads
 
         # Harvest track namespace mapping
         next_harvest_id = 1
@@ -748,7 +934,17 @@ class HarvestRunner:
                 break
             frame_idx += 1
             frames_seen = frame_idx + 1
-            if frame_idx % self.config.stride != 0:
+            process_frame = True
+            selector = self.config.frame_selector
+            if selector is not None:
+                try:
+                    process_frame = bool(selector(frame_idx))
+                except Exception as exc:  # pragma: no cover - selector errors logged for diagnosis
+                    LOGGER.debug("frame_selector error at frame %d: %s", frame_idx, exc, exc_info=True)
+                    process_frame = True
+            elif frame_idx % self.config.stride != 0:
+                process_frame = False
+            if not process_frame:
                 log_progress(frames_seen)
                 continue
 
@@ -756,12 +952,25 @@ class HarvestRunner:
             timestamp_ms = (frame_idx / fps) * 1000.0
 
             person_dets = self.person_detector.detect(frame, frame_idx)
-            observations = self.tracker.update(person_dets, frame.shape)
+            observations_list = list(self.tracker.update(person_dets, frame.shape))
+            base_bboxes = [obs.bbox for obs in observations_list]
+            face_dets = self.face_detector.detect(frame, frame_idx)
+            face_only_ids: set[int] = set()
+            if face_only_tracker is not None:
+                extra_observations = face_only_tracker.update(
+                    frame_idx=frame_idx,
+                    timestamp_ms=timestamp_ms,
+                    faces=face_dets,
+                    existing_bboxes=base_bboxes,
+                )
+                if extra_observations:
+                    observations_list.extend(extra_observations)
+                    face_only_ids = {obs.track_id for obs in extra_observations}
+            observations = observations_list
             accumulator.update(frame_idx, timestamp_ms, observations)
             active_tracks = dict(accumulator.active)
             track_lookup = {obs.track_id: obs for obs in observations}
 
-            face_dets = self.face_detector.detect(frame, frame_idx)
             assignments: Dict[int, AssignedFace] = {}
             recall_assignments: Dict[int, AssignedFace] = {}
             unmatched_faces = set(range(len(face_dets)))
@@ -849,6 +1058,8 @@ class HarvestRunner:
                             person_bbox=tuple(meta["person_bbox"]),
                             frame_offset=meta["frame_offset"],
                         )
+                        if track_id in face_only_ids:
+                            candidate.mode = "face_only"
                         existing = assignments.get(track_id)
                         if not self.config.multi_face_per_track_guard or existing is None:
                             assignments[track_id] = candidate
@@ -877,6 +1088,8 @@ class HarvestRunner:
                             person_bbox=obs.bbox,
                             frame_offset=0,
                         )
+                        if track_id in face_only_ids:
+                            candidate.mode = "face_only_center"
                         assignments[track_id] = candidate
                         unmatched_faces.discard(face_idx)
 
@@ -903,7 +1116,7 @@ class HarvestRunner:
                         and best_iou >= self.config.recall_track_iou
                         and face_iou >= self.config.recall_face_iou
                     ):
-                        recall_assignments[best_track] = AssignedFace(
+                        candidate = AssignedFace(
                             face_idx=face_idx,
                             mode="recall",
                             overlap=float(best_iou),
@@ -912,6 +1125,9 @@ class HarvestRunner:
                             frame_offset=0,
                             recall_only=True,
                         )
+                        if best_track in face_only_ids:
+                            candidate.mode = "face_only_recall"
+                        recall_assignments[best_track] = candidate
                         unmatched_faces.discard(face_idx)
                         continue
                 record_reject(
@@ -1345,8 +1561,9 @@ class HarvestRunner:
         pre_stitch_count = len(selection_map)
         track_by_id: Dict[int, TrackState] = {t.track_id: t for t in finished_tracks}
         track_id_map: Dict[int, int] = {}
+        identity_group_payloads: List[Dict[str, Any]] = []
         if self.config.stitch_identities and selection_map:
-            selection_map, track_by_id, harvest_source_byte, track_id_map = _stitch_selection(
+            selection_map, track_by_id, harvest_source_byte, track_id_map, identity_group_payloads = _stitch_selection(
                 selection_map,
                 track_by_id,
                 harvest_source_byte,
@@ -1357,26 +1574,81 @@ class HarvestRunner:
                     old_track = row.get("track_id")
                     if isinstance(old_track, int) and old_track in track_id_map:
                         row["track_id"] = track_id_map[old_track]
-        manifest_entries: List[ManifestEntry] = []
-        for hid, samples in selection_map.items():
-            byte_id = harvest_source_byte.get(hid)
-            track_state = track_by_id.get(hid)
-            entry = ManifestEntry(
-                track_id=hid,
-                byte_track_id=byte_id,
-                total_frames=track_state.duration_frames if track_state else 0,
-                avg_conf=track_state.avg_score if track_state else 0.0,
-                avg_area=float(np.mean([bbox_area(b) for b in track_state.bboxes])) if track_state and track_state.bboxes else 0.0,
-                first_ts_ms=track_state.timestamps_ms[0] if track_state and track_state.timestamps_ms else 0.0,
-                last_ts_ms=track_state.timestamps_ms[-1] if track_state and track_state.timestamps_ms else 0.0,
-                samples=samples,
-            )
-            manifest_entries.append(entry)
+        if not self.config.audit_mode:
+            manifest_entries: List[ManifestEntry] = []
+            for hid, samples in selection_map.items():
+                byte_id = harvest_source_byte.get(hid)
+                track_state = track_by_id.get(hid)
+                entry = ManifestEntry(
+                    track_id=hid,
+                    byte_track_id=byte_id,
+                    total_frames=track_state.duration_frames if track_state else 0,
+                    avg_conf=track_state.avg_score if track_state else 0.0,
+                    avg_area=float(np.mean([bbox_area(b) for b in track_state.bboxes])) if track_state and track_state.bboxes else 0.0,
+                    first_ts_ms=track_state.timestamps_ms[0] if track_state and track_state.timestamps_ms else 0.0,
+                    last_ts_ms=track_state.timestamps_ms[-1] if track_state and track_state.timestamps_ms else 0.0,
+                    samples=samples,
+                )
+                manifest_entries.append(entry)
 
-        manifest_path = harvest_dir / "manifest.json"
-        dump_json(manifest_path, [entry.to_dict() for entry in manifest_entries])
+            manifest_path = harvest_dir / "manifest.json"
+            dump_json(manifest_path, [entry.to_dict() for entry in manifest_entries])
 
-        if candidate_rows:
+            identity_records = identity_group_payloads
+            if not identity_records:
+                identity_records = []
+                for hid, track_state in track_by_id.items():
+                    samples_for_track = selection_map.get(hid, [])
+                    start_frame = track_state.start_frame if track_state else (samples_for_track[0].frame_idx if samples_for_track else None)
+                    end_frame = track_state.end_frame if track_state else (samples_for_track[-1].frame_idx if samples_for_track else None)
+                    if track_state and track_state.timestamps_ms:
+                        start_ms = track_state.timestamps_ms[0]
+                        end_ms = track_state.timestamps_ms[-1]
+                    elif samples_for_track:
+                        start_ms = samples_for_track[0].timestamp_ms
+                        end_ms = samples_for_track[-1].timestamp_ms
+                    else:
+                        start_ms = 0.0
+                        end_ms = start_ms
+                    byte_id = harvest_source_byte.get(hid)
+                    identity_records.append(
+                        {
+                            "track_id": int(hid),
+                            "component_track_ids": [int(hid)],
+                            "component_byte_track_ids": [int(byte_id)] if byte_id is not None else [],
+                            "byte_track_id": int(byte_id) if byte_id is not None else None,
+                            "start_frame": int(start_frame) if start_frame is not None else None,
+                            "end_frame": int(end_frame) if end_frame is not None else None,
+                            "start_ms": float(start_ms),
+                            "end_ms": float(end_ms),
+                            "components": [
+                                {
+                                    "track_id": int(hid),
+                                    "byte_track_id": int(byte_id) if byte_id is not None else None,
+                                    "start_ms": float(start_ms),
+                                    "end_ms": float(end_ms),
+                                }
+                            ],
+                        }
+                    )
+
+            identity_tracks_payload = {
+                str(record["track_id"]): {
+                    "byte_track_id": record["byte_track_id"],
+                    "component_track_ids": record["component_track_ids"],
+                    "component_byte_track_ids": record["component_byte_track_ids"],
+                    "start_frame": record["start_frame"],
+                    "end_frame": record["end_frame"],
+                    "start_ms": record["start_ms"],
+                    "end_ms": record["end_ms"],
+                    "components": record["components"],
+                }
+                for record in identity_records
+            }
+            identity_tracks_path = harvest_dir / "identity_tracks.json"
+            dump_json(identity_tracks_path, identity_tracks_payload)
+            LOGGER.info("Identity track summary written to %s", identity_tracks_path)
+
             selected_csv = harvest_dir / "selected_samples.csv"
             fieldnames = [
                 "track_id",
@@ -1400,10 +1672,23 @@ class HarvestRunner:
             with selected_csv.open("w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
-                writer.writerows(candidate_rows)
-            LOGGER.info("Harvest selection summary written to %s", selected_csv)
+                if candidate_rows:
+                    writer.writerows(candidate_rows)
+            if candidate_rows:
+                LOGGER.info("Harvest selection summary written to %s", selected_csv)
+            else:
+                LOGGER.info("Harvest selection summary written to %s (no samples)", selected_csv)
+        else:
+            manifest_path = harvest_dir / "manifest.json"
 
-        if self.config.debug_rejections:
+        if self.config.collect_events or self.config.audit_mode:
+            self.last_frame_events = {int(frame): list(events) for frame, events in frame_events.items()}
+            self.last_reject_counter = dict(reject_counter)
+        else:
+            self.last_frame_events = {}
+            self.last_reject_counter = {}
+
+        if self.config.debug_rejections and not self.config.audit_mode:
             debug_path = harvest_dir / "harvest_debug.json"
             payload: Dict[str, Any] = {
                 "reject_counts": dict(reject_counter),

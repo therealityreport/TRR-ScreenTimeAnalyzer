@@ -28,7 +28,7 @@ class TrackSamples:
     paths: List[Path]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cluster harvested tracks using ArcFace embeddings.")
     parser.add_argument("harvest_dir", type=Path, help="Harvest directory containing manifest.json and crops.")
     parser.add_argument(
@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path for a JSON QC report (defaults to harvest_dir/clusters_qc.json).",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_selected_samples(

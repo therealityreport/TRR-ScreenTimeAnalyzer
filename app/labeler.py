@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import math
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, MutableSet, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -136,6 +137,18 @@ def current_shortcut() -> Optional[str]:
     return shortcut
 
 
+def consume_selected_sample() -> Optional[str]:
+    params = st.query_params
+    value = params.get("select_sample")
+    if not value:
+        return None
+    selection = value if isinstance(value, str) else value[-1]
+    new_params = {k: v for k, v in params.items() if k != "select_sample"}
+    st.query_params.clear()
+    st.query_params.update(new_params)
+    return selection
+
+
 def register_shortcuts() -> None:
     components.html(
         """
@@ -232,14 +245,20 @@ def gather_selected_samples(track_id: int, samples: pd.DataFrame) -> List[str]:
         path = str(row["path"])
         key = f"sample_cb_{track_id}_{idx}"
         value = st.session_state.get(key)
-        if value:
+        if value and not str(row.get("assigned_person_label", "")).strip():
             selected.append(path)
     return selected
 
 
 def set_all_samples(track_id: int, samples: pd.DataFrame, checked: bool) -> None:
     for idx in samples.index:
-        st.session_state[f"sample_cb_{track_id}_{idx}"] = checked
+        row = samples.loc[idx]
+        assigned_label = str(row.get("assigned_person_label", "")).strip()
+        key = f"sample_cb_{track_id}_{idx}"
+        if assigned_label:
+            st.session_state[key] = False
+        else:
+            st.session_state[key] = checked
 
 
 def initialize_sample_checkbox(track_id: int, index: int, default: bool) -> bool:
@@ -465,6 +484,9 @@ def collect_pending_sample_actions(track_id: int, track_samples: pd.DataFrame) -
         key = f"sample_action_{track_id}_{idx}"
         action = st.session_state.get(key, "Keep")
         if action != "Keep":
+            if str(row.get("assigned_person_label", "")).strip():
+                st.session_state[key] = "Keep"
+                continue
             actions.append((idx, action, row))
     return actions
 
@@ -473,8 +495,19 @@ def process_sample_actions(
     harvest_dir: Path,
     track_id: int,
     actions: List[Tuple[int, str, pd.Series]],
+    *,
+    stem: str,
+    byte_track_id: int,
+    facebank_dir: Path,
+    assignments_log: Path,
 ) -> List[str]:
     messages: List[str] = []
+    assignments_changed = False
+    _, assignment_index = load_assignments_cached(str(assignments_log))
+    existing_sources: MutableSet[str] = set()
+    for details in assignment_index.values():
+        existing_sources.update(details.sources)
+
     for idx, action, row in actions:
         sample_path = Path(str(row.get("path", "")))
         frame_idx = safe_int(row.get("frame"))
@@ -497,11 +530,34 @@ def process_sample_actions(
                 messages.append(f"Deleted {original_path.name}")
             else:
                 messages.append(f"Unable to delete {original_path.name}")
+        elif action.startswith("Assign → "):
+            person_label = action.split("Assign → ", 1)[1].strip()
+            if person_label:
+                result = assign_lib.assign_samples(
+                    [sample_path],
+                    stem=stem,
+                    harvest_id=track_id,
+                    byte_track_id=byte_track_id,
+                    person_label=person_label,
+                    facebank_dir=facebank_dir,
+                    assignments_log=assignments_log,
+                    existing_sources=existing_sources,
+                )
+                if result.copied:
+                    assignments_changed = True
+                    for source, _ in result.copied:
+                        existing_sources.add(source)
+                    messages.append(f"Assigned {original_path.name} to {person_label}")
+                else:
+                    messages.append(f"No files copied for {original_path.name}")
 
         st.session_state.pop(f"sample_action_{track_id}_{idx}", None)
 
     if messages:
         load_samples_cached.clear()
+    if assignments_changed:
+        load_assignments_cached.clear()
+        list_person_labels.clear()
     return messages
 
 
@@ -528,6 +584,7 @@ def render_missing_samples_panel(
         )
         for idx, row in missing_rows:
             sample_path = Path(str(row.get("path", "")))
+            original_canonical = canonical_sample_path(sample_path)
             frame_idx = safe_int(row.get("frame"))
             cols = st.columns([3, 2])
             with cols[0]:
@@ -569,14 +626,29 @@ def render_missing_samples_panel(
                         st.rerun()
 
 
-def render_facebank_browser(facebank_dir: Path) -> None:
-    labels = list_person_labels(str(facebank_dir))
+def render_facebank_browser(
+    facebank_dir: Path,
+    *,
+    key_prefix: str = "",
+    labels: Optional[List[str]] = None,
+) -> None:
+    if labels is None:
+        labels = list_person_labels(str(facebank_dir))
     if not labels:
         st.info("No facebank entries found yet. Assign tracks to build the library.")
         return
 
-    selected_person = st.selectbox("Person", labels, key="facebank_browser_person")
-    max_images = st.slider("Images to preview", min_value=8, max_value=120, value=32, step=4)
+    person_key = f"{key_prefix}facebank_browser_person"
+    slider_key = f"{key_prefix}facebank_browser_max"
+    selected_person = st.selectbox("Person", labels, key=person_key)
+    max_images = st.slider(
+        "Images to preview",
+        min_value=8,
+        max_value=120,
+        value=32,
+        step=4,
+        key=slider_key,
+    )
 
     st.caption("Preview archived samples for the selected person to audit assignments.")
 
@@ -607,13 +679,81 @@ def render_facebank_browser(facebank_dir: Path) -> None:
             if img_idx >= total:
                 break
             img_path = images[img_idx]
-            cols[col_idx].image(str(img_path), caption=img_path.name, use_column_width=True)
+            cols[col_idx].image(str(img_path), caption=img_path.name, use_container_width=True)
+            if cols[col_idx].button(
+                "🗑️ Remove",
+                key=f"{key_prefix}remove_{selected_person}_{img_idx}",
+                help="Remove from facebank and restore to original track",
+            ):
+                removal = assign_lib.unassign_sample(img_path, ASSIGNMENTS_LOG, PROJECT_ROOT)
+                source_path: Optional[Path] = None
+                person_label = selected_person
+                if removal is not None:
+                    stem, source_str, person = removal
+                    person_label = person or selected_person
+                    if source_str:
+                        tentative = Path(source_str)
+                        if not tentative.is_absolute():
+                            tentative = (PROJECT_ROOT / tentative).resolve()
+                        source_path = tentative
+                if img_path.exists():
+                    if source_path is not None and not source_path.exists():
+                        source_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(img_path, source_path)
+                    try:
+                        img_path.unlink()
+                    except OSError:
+                        pass
+                load_assignments_cached.clear()
+                list_person_labels.clear()
+                load_samples_cached.clear()
+                if removal is None:
+                    st.warning("Removed image but did not find a matching assignment entry.")
+                else:
+                    st.success(f"Returned image to harvest and removed from {person_label}.")
+                st.rerun()
+
+
+def render_facebank_view(facebank_dir: Path) -> None:
+    st.header("Facebank Library")
+
+    labels = list_person_labels(str(facebank_dir))
+    if not labels:
+        st.info("No facebank entries found yet. Assign tracks to build the library.")
+        return
+
+    stats: List[Dict[str, object]] = []
+    for label in labels:
+        person_dir = facebank_dir / label
+        if not person_dir.exists():
+            continue
+        count = sum(1 for p in person_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+        stats.append({"Person": label, "Images": count})
+
+    if stats:
+        stats_df = pd.DataFrame(stats).sort_values("Person").reset_index(drop=True)
+        st.dataframe(stats_df, use_container_width=True)
+    else:
+        st.caption("No images stored yet.")
+
+    st.markdown("### Browse samples")
+    render_facebank_browser(facebank_dir, key_prefix="full_", labels=labels)
+
+
+def _is_valid_number(value: Optional[float]) -> bool:
+    if value is None:
+        return False
+    try:
+        return not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def render_assignment_panel(
     stem: str,
     track_row: pd.Series,
     track_samples: pd.DataFrame,
+    assignable_samples: pd.DataFrame,
     selected_paths: List[str],
     facebank_dir: Path,
     assignments_log: Path,
@@ -625,6 +765,8 @@ def render_assignment_panel(
     cluster_id: Optional[int],
     cluster_tracks: Sequence[int],
     clusters: Dict[int, List[int]],
+    available_track_ids: Sequence[int],
+    active_index: int,
 ) -> None:
     track_id = int(track_row["track_id"])
     byte_track_id = int(track_row["byte_track_id"])
@@ -666,12 +808,12 @@ def render_assignment_panel(
         st.metric("Rejections", value=int(track_row.get("rejection_count") or 0))
     with meta_cols[2]:
         median_quality = track_row.get("median_quality")
-        if median_quality is not None and not math.isnan(median_quality):
+        if _is_valid_number(median_quality):
             st.metric("Median quality", f"{median_quality:.2f}")
     with meta_cols[3]:
         total_frames = track_row.get("total_frames")
-        if total_frames:
-            st.metric("Frames", int(total_frames))
+        if _is_valid_number(total_frames):
+            st.metric("Frames", int(float(total_frames)))
 
     assigned_persons = track_row.get("assigned_persons") or ""
     default_person = assigned_persons.split(", ")[0].strip() if assigned_persons else ""
@@ -705,6 +847,7 @@ def render_assignment_panel(
     else:
         st.session_state.pop("active_target_label", None)
 
+    assignable_count = len(assignable_samples)
     st.caption("Keyboard: A=Assign selected, N=Next cluster, Space=toggle focus sample.")
     assign_selected_disabled = target_label is None or not selected_paths
     assign_selected_requested = st.button(
@@ -714,8 +857,8 @@ def render_assignment_panel(
         type="primary",
     )
     assign_all_requested = st.button(
-        f"Assign all {len(track_samples)} samples",
-        disabled=target_label is None or track_samples.empty,
+        f"Assign all {assignable_count} samples",
+        disabled=target_label is None or assignable_count == 0,
         key=f"assign_all_btn_{track_id}",
     )
     cluster_assign_requested = False
@@ -728,6 +871,8 @@ def render_assignment_panel(
     representative_sample: Optional[Path] = None
     if selected_paths:
         representative_sample = Path(selected_paths[0])
+    elif not assignable_samples.empty:
+        representative_sample = Path(assignable_samples.iloc[0]["path"])
     elif not track_samples.empty:
         representative_sample = Path(track_samples.iloc[0]["path"])
 
@@ -767,7 +912,7 @@ def render_assignment_panel(
 
     paths_to_assign: List[str] = []
     if assign_all_requested and target_label is not None:
-        paths_to_assign = [str(Path(p)) for p in track_samples["path"].tolist()]
+        paths_to_assign = [str(Path(p)) for p in assignable_samples["path"].tolist()]
     elif assign_selected_requested and target_label is not None:
         paths_to_assign = list(selected_paths)
 
@@ -825,6 +970,17 @@ def render_assignment_panel(
                 st.success(f"Copied {total_copied} file(s) to {normalized_label}")
                 load_assignments_cached.clear()
                 list_person_labels.clear()
+                advance_after_assignment = (
+                    assign_all_requested or cluster_assign_requested or assign_selected_requested
+                )
+                if advance_after_assignment:
+                    available_ids = list(available_track_ids)
+                    if available_ids:
+                        if len(available_ids) == 1:
+                            st.session_state["active_track_id"] = available_ids[0]
+                        else:
+                            next_idx = (active_index + 1) % len(available_ids)
+                            st.session_state["active_track_id"] = available_ids[next_idx]
                 st.rerun()
             else:
                 st.info("No files copied.")
@@ -842,31 +998,51 @@ def render_thumbnail_grid(
     harvest_dir: Path,
     assignment_info: Optional[data_lib.TrackAssignment],
     target_label: Optional[str],
-) -> None:
+    facebank_labels: Sequence[str],
+) -> pd.DataFrame:
     assigned_lookup: Dict[str, str] = {}
     if assignment_info:
         for source_path, person in assignment_info.source_to_person.items():
             if person:
                 assigned_lookup[canonical_sample_path(source_path)] = person
 
+    display_rows = track_samples.copy()
+    display_rows["assigned_person_label"] = display_rows["path"].map(
+        lambda p: assigned_lookup.get(canonical_sample_path(Path(str(p))), "")
+    )
+    display_rows["is_unassigned"] = display_rows["assigned_person_label"].eq("")
+    display_rows = display_rows.sort_values(
+        by=["is_unassigned", "assigned_person_label"],
+        ascending=[False, True],
+        kind="stable",
+    )
+
+    visible_rows = display_rows[display_rows["is_unassigned"]].copy()
+    if visible_rows.empty:
+        st.info("All samples in this track are already assigned to the facebank.")
+        return visible_rows
+
     cols_per_row = 4
-    rows = math.ceil(len(track_samples) / cols_per_row) or 1
+    rows = math.ceil(len(visible_rows) / cols_per_row) or 1
     focus_key = f"focused_sample_{track_id}"
     focused_idx = st.session_state.get(focus_key)
-    if focused_idx is None and not track_samples.empty:
-        focused_idx = track_samples.index[0]
+    if focused_idx is None and not visible_rows.empty:
+        focused_idx = visible_rows.index[0]
         st.session_state[focus_key] = focused_idx
 
     action_options = ["Keep", "Move to UNASSIGNED", "Delete"]
+    if facebank_labels:
+        action_options.extend([f"Assign → {label}" for label in facebank_labels])
 
     for row_idx in range(rows):
         cols = st.columns(cols_per_row)
         for col_idx in range(cols_per_row):
             sample_idx = row_idx * cols_per_row + col_idx
-            if sample_idx >= len(track_samples):
+            if sample_idx >= len(visible_rows):
                 continue
-            row = track_samples.iloc[sample_idx]
+            row = visible_rows.iloc[sample_idx]
             sample_path = Path(str(row.get("path", "")))
+            original_canonical = canonical_sample_path(sample_path)
             checkbox_key = f"sample_cb_{track_id}_{row.name}"
             default_checked = bool(row.get("picked")) and not bool(row.get("is_debug"))
             checked = initialize_sample_checkbox(track_id, row.name, default_checked)
@@ -890,13 +1066,14 @@ def render_thumbnail_grid(
             if row.name == focused_idx:
                 caption_parts.insert(0, "★ Focus")
 
-            assigned_person = assigned_lookup.get(canonical_sample_path(sample_path))
+            assigned_person = row.get("assigned_person_label") or ""
             try:
                 thumb_path = thumb_lib.ensure_thumbnail(sample_path, stem, thumbnails_dir)
             except FileNotFoundError:
                 fallback = find_alternate_sample_path(harvest_dir, sample_path)
                 if fallback and fallback.exists():
                     track_samples.at[row.name, "path"] = str(fallback)
+                    visible_rows.at[row.name, "path"] = str(fallback)
                     update_sample_csv_record(
                         harvest_dir,
                         track_id,
@@ -905,10 +1082,16 @@ def render_thumbnail_grid(
                         "path_update",
                         fallback,
                     )
+                    reassigned_label = assigned_lookup.pop(original_canonical, None)
+                    if reassigned_label:
+                        assigned_lookup[canonical_sample_path(fallback)] = reassigned_label
+                        visible_rows.at[row.name, "assigned_person_label"] = reassigned_label
+                        visible_rows.at[row.name, "is_unassigned"] = reassigned_label == ""
                     load_samples_cached.clear()
                     try:
                         thumb_path = thumb_lib.ensure_thumbnail(fallback, stem, thumbnails_dir)
                         sample_path = fallback
+                        assigned_person = visible_rows.at[row.name, "assigned_person_label"] or ""
                     except FileNotFoundError:
                         cols[col_idx].warning(f"Missing: {sample_path}")
                         continue
@@ -917,17 +1100,35 @@ def render_thumbnail_grid(
                     continue
 
             caption = ", ".join(caption_parts) if caption_parts else sample_path.name
-            cols[col_idx].image(str(thumb_path), caption=caption, use_column_width=True)
-
-            if assigned_person:
-                cols[col_idx].markdown(
-                    f"<div style='text-align:center; background-color:#2d6cdf; color:white;"
-                    " padding:0.25rem 0.4rem; border-radius:0 0 6px 6px; font-size:0.75rem;'>"
-                    f"ASSIGNED • {assigned_person}</div>",
-                    unsafe_allow_html=True,
-                )
+            suffix = sample_path.suffix.lower()
+            if suffix in {".png"}:
+                mime_type = "image/png"
+            elif suffix in {".webp"}:
+                mime_type = "image/webp"
+            else:
+                mime_type = "image/jpeg"
+            encoded = base64.b64encode(thumb_path.read_bytes()).decode("ascii")
+            js_payload = (
+                "{{isStreamlitMessage: true, type: 'streamlit:setQueryParams', "
+                f"queryParams: {{select_sample: '{track_id}:{row.name}'}}}}"
+            )
+            image_html = (
+                f'<div onclick="window.parent.postMessage({js_payload}, \'*\');" '
+                'style="cursor:pointer;">'
+                f'<img src="data:{mime_type};base64,{encoded}" '
+                'style="width:100%; border-radius:6px;"/>'
+                "</div>"
+            )
+            cols[col_idx].markdown(image_html, unsafe_allow_html=True)
+            cols[col_idx].caption(caption)
 
             action_key = f"sample_action_{track_id}_{row.name}"
+            if cols[col_idx].button(
+                "🗑️",
+                key=f"delete_btn_{track_id}_{row.name}",
+                help="Queue delete for this sample",
+            ):
+                st.session_state[action_key] = "Delete"
             cols[col_idx].selectbox(
                 "Action",
                 action_options,
@@ -950,6 +1151,8 @@ def render_thumbnail_grid(
                         "label": target_label,
                     }
                     st.rerun()
+
+    return visible_rows
 
 
 def main() -> None:
@@ -976,6 +1179,12 @@ def main() -> None:
     if CLI_ARGS.video is None:
         st.warning("Video path not supplied; overlay and attribution tools will be limited.")
 
+    view_mode = st.sidebar.radio("Mode", ["Label Tracks", "Facebank", "Unclustered Tracks"], index=0)
+    if view_mode == "Facebank":
+        render_facebank_view(CLI_ARGS.facebank_dir)
+        return
+    is_unclustered_mode = view_mode == "Unclustered Tracks"
+
     include_debug = st.sidebar.toggle("Include debug rejects", value=False)
     min_samples = st.sidebar.slider("Min picked samples", 0, 20, 0)
     min_frames = st.sidebar.slider("Min track frames", 0, 300, 0, step=5)
@@ -984,7 +1193,12 @@ def main() -> None:
     manifest_df = load_manifest_cached(str(harvest_dir))
     samples_df = load_samples_cached(str(harvest_dir))
     clusters = load_clusters_cached(str(harvest_dir))
-    track_to_cluster = {track: cid for cid, tracks in clusters.items() for track in tracks}
+    clustered_track_ids = {int(track) for track_list in clusters.values() for track in track_list}
+    if is_unclustered_mode:
+        track_to_cluster = {}
+        clusters = {}
+    else:
+        track_to_cluster = {track: cid for cid, tracks in clusters.items() for track in tracks}
     if track_to_cluster:
         samples_df = samples_df.copy()
         samples_df["cluster_id"] = samples_df["track_id"].map(track_to_cluster)
@@ -1053,10 +1267,24 @@ def main() -> None:
         status=filtered.apply(data_lib.assignment_status, axis=1),
         status_rank=lambda df: df["status"].map({"Unassigned": 0, "Partially Assigned": 1, "Assigned": 2}),
     )
+    if is_unclustered_mode and clustered_track_ids:
+        filtered = filtered[~filtered["track_id"].isin(clustered_track_ids)]
+        if filtered.empty:
+            st.success("All clustered tracks are complete. No unclustered tracks remain.")
+            return
     if track_to_cluster:
         filtered = filtered.assign(cluster_id=filtered["track_id"].map(track_to_cluster))
     else:
         filtered = filtered.assign(cluster_id=pd.NA)
+
+    assigned_hidden = int((filtered["status"] == "Assigned").sum())
+    if assigned_hidden:
+        st.sidebar.caption(f"{assigned_hidden} assigned track(s) hidden")
+    filtered = filtered[filtered["status"] != "Assigned"].copy()
+    if filtered.empty:
+        st.success("All tracks have been assigned. Switch to the Facebank view to review labeled photos.")
+        return
+
     sort_cols = ["status_rank", "picked_count", "max_quality"]
     sort_orders = [True, False, False]
     if track_to_cluster:
@@ -1074,8 +1302,15 @@ def main() -> None:
     if track_to_cluster:
         cluster_options = [None] + sorted(clusters.keys())
         cluster_labels = {None: "All clusters"}
+        remaining_counts: Dict[int, int] = (
+            filtered[filtered["cluster_id"].notna()]
+            .groupby("cluster_id")["track_id"]
+            .count()
+            .to_dict()
+        )
         for cid in sorted(clusters.keys()):
-            cluster_labels[cid] = f"Cluster {cid:03d} ({len(clusters[cid])} tracks)"
+            remaining = int(remaining_counts.get(cid, 0))
+            cluster_labels[cid] = f"Cluster {cid:03d} ({remaining} remaining)"
         selected_cluster = st.sidebar.selectbox(
             "Cluster filter",
             options=cluster_options,
@@ -1087,6 +1322,9 @@ def main() -> None:
             if filtered.empty:
                 st.info("No tracks remain after applying the cluster filter.")
                 return
+        remaining_cluster_total = sum(1 for count in remaining_counts.values() if count > 0)
+    else:
+        remaining_cluster_total = 0
 
     filtered = filtered.reset_index(drop=True)
     track_ids = filtered["track_id"].astype(int).tolist()
@@ -1100,18 +1338,35 @@ def main() -> None:
         active_track = track_ids[0]
         st.session_state["active_track_id"] = active_track
 
+    pending_track = st.session_state.get("pending_toggle_track")
+    pending_sample = st.session_state.get("pending_toggle_sample")
+    if pending_track is not None and pending_track not in track_ids:
+        st.session_state.pop("pending_toggle_track", None)
+        st.session_state.pop("pending_toggle_sample", None)
+        pending_track = None
+        pending_sample = None
+    if pending_track == active_track and pending_sample is not None:
+        checkbox_key = f"sample_cb_{active_track}_{pending_sample}"
+        st.session_state[checkbox_key] = not st.session_state.get(checkbox_key, False)
+        st.session_state[f"focused_sample_{active_track}"] = pending_sample
+        st.session_state.pop("pending_toggle_track", None)
+        st.session_state.pop("pending_toggle_sample", None)
+
     if track_to_cluster:
         if selected_cluster is not None:
-            st.sidebar.caption(f"Cluster {selected_cluster:03d} • {len(track_ids)} tracks")
+            st.sidebar.caption(f"Cluster {selected_cluster:03d} • {len(track_ids)} track(s) remaining")
         else:
-            st.sidebar.caption(f"{len(clusters)} clusters • {len(track_ids)} tracks")
+            active_clusters = remaining_cluster_total if remaining_cluster_total else len(clusters)
+            st.sidebar.caption(f"{len(track_ids)} track(s) remaining across {active_clusters} cluster(s)")
     else:
-        st.sidebar.caption(f"{len(track_ids)} tracks available")
+        descriptor = "unclustered track(s)" if is_unclustered_mode else "track(s)"
+        st.sidebar.caption(f"{len(track_ids)} {descriptor} available")
 
     track_samples = data_lib.samples_for_track(samples_df, active_track, include_debug=include_debug)
     if track_samples.empty:
         st.warning("No samples for selected track.")
         return
+    track_samples = track_samples.copy()
     active_index = track_ids.index(active_track)
     active_cluster_id = track_to_cluster.get(active_track) if track_to_cluster else None
     cluster_label = None
@@ -1126,6 +1381,16 @@ def main() -> None:
     assignment_info = assignment_index.get(track_key)
     current_target_label = st.session_state.get("active_target_label")
 
+    assigned_lookup_for_track: Dict[str, str] = {}
+    if assignment_info:
+        for source_path, person in assignment_info.source_to_person.items():
+            if person:
+                assigned_lookup_for_track[canonical_sample_path(source_path)] = person
+    track_samples["assigned_person_label"] = track_samples["path"].map(
+        lambda p: assigned_lookup_for_track.get(canonical_sample_path(Path(str(p))), "")
+    )
+    unassigned_count = int((track_samples["assigned_person_label"].astype(str).str.len() == 0).sum())
+
     nav_cols = st.columns([1, 3, 1])
     with nav_cols[0]:
         if st.button("◀ Previous", key="cluster_prev"):
@@ -1133,7 +1398,9 @@ def main() -> None:
             st.rerun()
     with nav_cols[1]:
         st.subheader(f"{cluster_title} • Track {active_track:04d}")
-        st.caption(f"{active_index + 1} of {len(track_ids)} • {len(track_samples)} samples")
+        st.caption(
+            f"{active_index + 1} of {len(track_ids)} • {unassigned_count} unassigned / {len(track_samples)} total"
+        )
     with nav_cols[2]:
         if st.button("Next ▶", key="cluster_next"):
             st.session_state["active_track_id"] = track_ids[(active_index + 1) % len(track_ids)]
@@ -1171,10 +1438,14 @@ def main() -> None:
         for message in feedback_messages:
             st.success(message)
 
+    # Refresh cached facebank labels when directory contents change.
+    list_person_labels.clear()
+    facebank_labels = list_person_labels(str(CLI_ARGS.facebank_dir))
+
     col_left, col_right = st.columns([3, 2])
 
     with col_left:
-        render_thumbnail_grid(
+        visible_samples = render_thumbnail_grid(
             selected_stem,
             active_track,
             byte_track_id,
@@ -1183,14 +1454,36 @@ def main() -> None:
             harvest_dir,
             assignment_info,
             current_target_label,
+            facebank_labels,
         )
-    selected_paths = gather_selected_samples(active_track, track_samples)
+    selected_token = consume_selected_sample()
+    if selected_token:
+        try:
+            token_track_str, token_sample_str = selected_token.split(":", 1)
+            token_track = int(token_track_str)
+            token_sample = int(token_sample_str)
+        except (ValueError, TypeError):
+            token_track = None
+            token_sample = None
+        if token_track is not None and token_sample is not None:
+            if token_track == active_track:
+                checkbox_key = f"sample_cb_{active_track}_{token_sample}"
+                current_state = st.session_state.get(checkbox_key, False)
+                st.session_state[checkbox_key] = not current_state
+                st.session_state[f"focused_sample_{active_track}"] = token_sample
+                st.rerun()
+            else:
+                st.session_state["pending_toggle_track"] = token_track
+                st.session_state["pending_toggle_sample"] = token_sample
+                st.session_state["active_track_id"] = token_track
+                st.rerun()
+    selected_paths = gather_selected_samples(active_track, visible_samples)
     with col_right:
-        facebank_labels = list_person_labels(str(CLI_ARGS.facebank_dir))
         render_assignment_panel(
             selected_stem,
             summary_row,
             track_samples,
+            visible_samples,
             selected_paths,
             CLI_ARGS.facebank_dir,
             ASSIGNMENTS_LOG,
@@ -1202,6 +1495,8 @@ def main() -> None:
             active_cluster_id,
             clusters.get(active_cluster_id, []) if active_cluster_id is not None else [],
             clusters,
+            track_ids,
+            active_index,
         )
 
     render_missing_samples_panel(
@@ -1217,7 +1512,15 @@ def main() -> None:
         with st.expander("Pending image maintenance actions", expanded=True):
             st.write(f"Queued {len(pending_actions)} action(s) for this track.")
             if st.button("Apply image actions", key=f"apply_actions_{active_track}"):
-                messages = process_sample_actions(harvest_dir, active_track, pending_actions)
+                messages = process_sample_actions(
+                    harvest_dir,
+                    active_track,
+                    pending_actions,
+                    stem=selected_stem,
+                    byte_track_id=byte_track_id,
+                    facebank_dir=CLI_ARGS.facebank_dir,
+                    assignments_log=ASSIGNMENTS_LOG,
+                )
                 if messages:
                     st.session_state["image_action_feedback"] = messages
                 else:
