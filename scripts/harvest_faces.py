@@ -451,12 +451,18 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
     pipeline_cfg = load_yaml(args.pipeline_config)
     tracker_cfg = load_yaml(args.tracker_config)
 
+    video_stem = infer_video_stem(args.video)
+    legacy_layout = args.harvest_dir is None
     if args.harvest_dir is not None:
-        harvest_dir = Path(args.harvest_dir)
+        output_root = Path(args.harvest_dir)
+        harvest_dir = output_root
     elif args.output_dir is not None:
-        harvest_dir = Path(args.output_dir) / infer_video_stem(args.video)
+        output_root = Path(args.output_dir)
+        harvest_dir = output_root / video_stem
     else:
-        harvest_dir = Path("data/harvest") / infer_video_stem(args.video)
+        output_root = Path("data/harvest")
+        harvest_dir = output_root / video_stem
+    output_root = output_root.expanduser().resolve()
     harvest_dir = harvest_dir.expanduser().resolve()
     ensure_dir(harvest_dir)
     migrate_nested_harvest(harvest_dir)
@@ -610,7 +616,7 @@ def run_standard_harvest(args: argparse.Namespace) -> None:
         harvest_config.stride = max(2, harvest_config.stride)
 
     runner = HarvestRunner(person_detector, face_detector, tracker, harvest_config)
-    manifest_path = runner.run(args.video, harvest_dir)
+    manifest_path = runner.run(args.video, output_root, legacy_layout=legacy_layout)
     LOGGER.info("Harvest manifest written to %s", manifest_path)
 
 def run_scene_aware_harvest(args: argparse.Namespace) -> None:
@@ -631,12 +637,18 @@ def run_scene_aware_harvest(args: argparse.Namespace) -> None:
         user_det_size_override=getattr(args, "_retina_size_override", False),
     )
 
+    video_stem = infer_video_stem(args.video)
     if args.harvest_dir is not None:
-        out_dir = ensure_dir(Path(args.harvest_dir).expanduser().resolve())
+        output_root = Path(args.harvest_dir)
+        harvest_dir = output_root
     elif args.output_dir is not None:
-        out_dir = ensure_dir((Path(args.output_dir) / infer_video_stem(args.video)).expanduser().resolve())
+        output_root = Path(args.output_dir)
+        harvest_dir = output_root / video_stem
     else:
-        out_dir = ensure_dir(Path("data/harvest") / infer_video_stem(args.video))
+        output_root = Path("data/harvest")
+        harvest_dir = output_root / video_stem
+    output_root = output_root.expanduser().resolve()
+    out_dir = ensure_dir(harvest_dir.expanduser().resolve())
     migrate_nested_harvest(out_dir)
 
     cap = cv2.VideoCapture(str(args.video))

@@ -275,7 +275,7 @@ class HarvestRunner:
         # ArcFace embedder for identity consistency checks (lazy)
         self.embedder = embedder
 
-    def run(self, video_path: Path, output_root: Path) -> Path:
+    def run(self, video_path: Path, output_root: Path, *, legacy_layout: bool = True) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
         if self.config.identity_guard and self.embedder is None:
             try:
@@ -295,9 +295,13 @@ class HarvestRunner:
         frame_area = float(width * height)
         self.tracker.set_frame_rate(fps)
 
+        output_root = Path(output_root)
         video_stem = infer_video_stem(video_path)
-        harvest_dir = ensure_dir(output_root / video_stem)
-        crops_dir = ensure_dir(harvest_dir)
+        if legacy_layout:
+            harvest_dir = ensure_dir(output_root / video_stem)
+        else:
+            harvest_dir = ensure_dir(output_root)
+        crops_dir = harvest_dir
         candidates_root = ensure_dir(harvest_dir / "candidates")
         candidate_dirs: Dict[int, Path] = {}
 
