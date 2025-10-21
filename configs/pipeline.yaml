@@ -5,9 +5,9 @@ stride: 1
 det_size: [960, 960]
 face_conf_th: 0.30
 person_conf_th: 0.10
-face_in_track_iou: 0.10
+face_in_track_iou: 0.30
 allow_face_center: false
-dilate_track_px: 0.25
+dilate_track_px: 0
 temporal_iou_tolerance: 3
 
 # Harvest sampling
@@ -32,7 +32,7 @@ fallback_head_pct: 0.4
 
 # Identity guard and stitching
 identity_guard: true
-identity_split: false  # CHANGED: Disabled to avoid fragmentation
+identity_split: true
 identity_sim_threshold: 0.62
 identity_min_picks: 3
 identity_guard_stride: 6
@@ -40,9 +40,9 @@ identity_guard_consecutive: 3
 identity_guard_cosine_reject: 0.35
 reindex_harvest_tracks: true
 stitch_identities: true
-stitch_sim: 0.35  # CHANGED: Lower from 0.45 for more aggressive merging
-stitch_gap_ms: 12000  # CHANGED: Increased from 8000 to bridge larger gaps
-stitch_min_iou: 0.05  # CHANGED: Lower from 0.10 for more permissive stitching
+stitch_sim: 0.45
+stitch_gap_ms: 8000
+stitch_min_iou: 0.10
 
 # Tracker pacing
 min_track_frames: 12
@@ -54,21 +54,31 @@ max_gap_ms: 2000  # CHANGED: Increased from 300 to bridge larger gaps
 min_run_ms: 300   # CHANGED: Decreased from 600 to keep shorter segments
 
 # Identity voting & persistence
-similarity_th: 0.35  # CHANGED: Dramatically lowered from 0.78 for weaker matches
-vote_decay: 0.95     # CHANGED: Lower from 0.99 to require fewer confirmations
-flip_tolerance: 0.40 # CHANGED: Higher from 0.30 to allow identity switches
+similarity_th: 0.60
+match_min_margin: 0.05
+vote_decay: 0.97
+flip_tolerance: 0.25
+per_label_similarity_th:
+  DEFAULT: 0.60
+  BRANDI: 0.70
+  KIM: 0.68
+  KYLE: 0.72
+  RINNA: 0.66
+  EILEEN: 0.68
+  LVP: 0.68
+  YOLANDA: 0.74
 
 # Identity change detection
-identity_split_min_frames: 5
-identity_change_margin: 0.05
-identity_split_enabled: false  # CHANGED: Disabled to match identity_split above
-embed_every_n: 1  # CHANGED: Embed EVERY frame with faces (was 2)
+identity_split_min_frames: 12
+identity_change_margin: 0.08
+identity_split_enabled: true
+embed_every_n: 1
 
 # Progress reporting defaults
 progress_fallback_frames: 500
 
 # Sample-based label fallback (uses harvested selected_samples)
 sample_label_fallback_enabled: true
-sample_label_min_votes: 1
-sample_label_min_score: 0.25  # CHANGED: Lower from 0.45 for more permissive matching
-sample_label_window_frames: 90  # CHANGED: Increased from 45 for wider temporal window
+sample_label_min_votes: 2
+sample_label_min_score: 0.45
+sample_label_window_frames: 60

@@ -1,0 +1,309 @@
+{
+  "per_person_screen_time": {
+    "KIM": 54.125,
+    "BRANDI": 1.708
+  },
+  "match_statistics": {
+    "before": {
+      "correct": [
+        0.773,
+        0.825,
+        0.778,
+        0.72,
+        0.845,
+        0.811,
+        0.72,
+        0.471,
+        0.854,
+        0.668,
+        0.868,
+        0.826,
+        0.877,
+        0.722,
+        0.152,
+        0.617,
+        0.623,
+        0.341,
+        0.691,
+        0.53,
+        0.088
+      ],
+      "incorrect": [
+        0.015,
+        0.016,
+        0.015,
+        0.02,
+        0.022,
+        0.014,
+        0.02,
+        -0.004,
+        0.016,
+        0.132,
+        0.152,
+        0.153,
+        0.078,
+        0.094,
+        0.108,
+        0.063,
+        0.032,
+        0.104,
+        0.156,
+        0.112,
+        0.088,
+        0.121,
+        0.061,
+        0.067,
+        0.059,
+        0.082,
+        0.034,
+        0.112,
+        0.077,
+        0.079,
+        0.064,
+        0.082,
+        0.05,
+        0.044,
+        0.1,
+        0.077,
+        0.096,
+        0.08,
+        0.111,
+        0.124,
+        0.137,
+        0.056,
+        0.113,
+        0.096,
+        0.096,
+        0.097,
+        0.094
+      ]
+    },
+    "after": {
+      "correct": [
+        0.701,
+        0.707,
+        0.704,
+        0.706,
+        0.707,
+        0.693,
+        0.703,
+        0.687,
+        0.691,
+        0.687,
+        0.695,
+        0.704,
+        0.721,
+        0.731,
+        0.735,
+        0.713,
+        0.703,
+        0.734,
+        0.746,
+        0.743,
+        0.697,
+        0.736,
+        0.751,
+        0.743,
+        0.702,
+        0.714,
+        0.714,
+        0.7,
+        0.737,
+        0.732,
+        0.742,
+        0.716,
+        0.744,
+        0.744,
+        0.741,
+        0.721,
+        0.727,
+        0.737,
+        0.739,
+        0.767,
+        0.763,
+        0.765,
+        0.775,
+        0.785,
+        0.756,
+        0.755,
+        0.728,
+        0.739,
+        0.725,
+        0.723,
+        0.699,
+        0.703,
+        0.739,
+        0.732,
+        0.703,
+        0.716,
+        0.728,
+        0.729,
+        0.731,
+        0.741,
+        0.717,
+        0.725,
+        0.724,
+        0.685,
+        0.693,
+        0.691,
+        0.686,
+        0.732,
+        0.741,
+        0.74,
+        0.683
+      ],
+      "incorrect": []
+    }
+  },
+  "track_splits": {
+    "total_splits": 0,
+    "mixed_tracks": 0,
+    "per_person_subtracks": {
+      "KIM": 19,
+      "BRANDI": 1
+    }
+  },
+  "fallback_usage_counts": {},
+  "config_diff": [
+    {
+      "config_key": "similarity_th",
+      "old_value": 0.35,
+      "new_value": 0.65
+    },
+    {
+      "config_key": "match_min_margin",
+      "old_value": null,
+      "new_value": 0.07
+    },
+    {
+      "config_key": "per_label_similarity_th.BRANDI",
+      "old_value": null,
+      "new_value": 0.7
+    },
+    {
+      "config_key": "per_label_similarity_th.KIM",
+      "old_value": null,
+      "new_value": 0.68
+    },
+    {
+      "config_key": "per_label_similarity_th.KYLE",
+      "old_value": null,
+      "new_value": 0.72
+    },
+    {
+      "config_key": "per_label_similarity_th.RINNA",
+      "old_value": null,
+      "new_value": 0.66
+    },
+    {
+      "config_key": "per_label_similarity_th.EILEEN",
+      "old_value": null,
+      "new_value": 0.68
+    },
+    {
+      "config_key": "per_label_similarity_th.LVP",
+      "old_value": null,
+      "new_value": 0.68
+    },
+    {
+      "config_key": "per_label_similarity_th.YOLANDA",
+      "old_value": null,
+      "new_value": 0.74
+    },
+    {
+      "config_key": "identity_split",
+      "old_value": false,
+      "new_value": true
+    },
+    {
+      "config_key": "identity_split_enabled",
+      "old_value": false,
+      "new_value": true
+    },
+    {
+      "config_key": "identity_split_min_frames",
+      "old_value": 5,
+      "new_value": 6
+    },
+    {
+      "config_key": "identity_change_margin",
+      "old_value": 0.05,
+      "new_value": 0.08
+    },
+    {
+      "config_key": "face_in_track_iou",
+      "old_value": 0.1,
+      "new_value": 0.35
+    },
+    {
+      "config_key": "dilate_track_px",
+      "old_value": 0.25,
+      "new_value": 0.05
+    },
+    {
+      "config_key": "vote_decay",
+      "old_value": 0.95,
+      "new_value": 0.97
+    },
+    {
+      "config_key": "flip_tolerance",
+      "old_value": 0.4,
+      "new_value": 0.25
+    },
+    {
+      "config_key": "stitch_sim",
+      "old_value": 0.35,
+      "new_value": 0.45
+    },
+    {
+      "config_key": "stitch_gap_ms",
+      "old_value": 12000,
+      "new_value": 8000
+    },
+    {
+      "config_key": "stitch_min_iou",
+      "old_value": 0.05,
+      "new_value": 0.1
+    },
+    {
+      "config_key": "sample_label_min_votes",
+      "old_value": 1,
+      "new_value": 2
+    },
+    {
+      "config_key": "sample_label_min_score",
+      "old_value": 0.25,
+      "new_value": 0.5
+    },
+    {
+      "config_key": "sample_label_window_frames",
+      "old_value": 90,
+      "new_value": 60
+    }
+  ],
+  "validation_logs": [
+    {
+      "video_id": "RHOBH-TEST-v2",
+      "issues_found": [
+        "lap>=0.5.12 unavailable; tracker used IOU association fallback",
+        "3 labelled tracks skipped for min_run_ms filtering: [19, 27, 111]",
+        "Only KIM and BRANDI detected; confirm other cast presence or adjust thresholds"
+      ],
+      "summary_metrics": {
+        "matches": 142,
+        "threshold_rejects": 524,
+        "margin_rejects": 0,
+        "fallback_tracks": 0,
+        "labels_detected": [
+          "KIM",
+          "BRANDI"
+        ],
+        "per_label_seconds": {
+          "KIM": 54.125,
+          "BRANDI": 1.708
+        }
+      }
+    }
+  ],
+  "error_handling_notes": "ByteTrack fell back to IOU matching because lap was missing; thresholds and margins are clamped to sane minimums; tracks shorter than min_run_ms are filtered but logged for follow-up."
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import logging
+import math
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -28,30 +29,14 @@ from screentime.types import TrackState, bbox_area, iou
 
 LOGGER = logging.getLogger("scripts.run_tracker")
 LOWCONF_DEBUG_LABELS = {"LVP", "BRANDI", "RINNA", "EILEEN"}
-PER_LABEL_SIMILARITY_TH_OVERRIDES = {
-    # OPTIMIZED: Dramatically lowered thresholds for CPU embeddings (FaceAnalysis fallback)
-    # to ensure all identities accumulate votes properly
-    "LVP": 0.20,        # Lower from 0.25
-    "RINNA": 0.35,      # Lower from 0.72
-    "EILEEN": 0.30,     # Lower from 0.64
-    "KIM": 0.35,        # Lower from 0.56
-    "BRANDI": 0.25,     # Lower from 0.55 - CRITICAL FIX
-    "KYLE": 0.30,       # Added - was missing
-    "YOLANDA": 0.30,    # Added - was missing
-}
-PER_LABEL_SIMILARITY_FLOOR = {
-    # Minimum acceptable similarity scores - very permissive
-    "LVP": 0.05,        # Lower from 0.08
-    "BRANDI": 0.05,     # Lower from 0.08
-    "RINNA": 0.05,      # Added
-    "EILEEN": 0.05,     # Added
-}
-DEFAULT_MIN_MARGIN = 0.0
+DEFAULT_MIN_MARGIN = 0.05
+MIN_PER_LABEL_THRESHOLD = 0.60
+PER_LABEL_SIMILARITY_FLOOR = 0.60
 
 SAMPLE_LABEL_FALLBACK_ENABLED = True
-SAMPLE_LABEL_MIN_VOTES_DEFAULT = 1
+SAMPLE_LABEL_MIN_VOTES_DEFAULT = 2
 SAMPLE_LABEL_MIN_SCORE_DEFAULT = 0.45
-SAMPLE_LABEL_WINDOW_FRAMES_DEFAULT = 45
+SAMPLE_LABEL_WINDOW_FRAMES_DEFAULT = 60
 
 
 def _infer_sample_votes(
@@ -177,6 +162,16 @@ def _apply_sample_votes_to_tracks(
             continue
 
         applied_labels: Dict[str, Dict[str, float]] = {}
+        hint_labels = {
+            lbl
+            for lbl, _ in list(track.label_scores.values()) + list(track.face_matches.values())
+            if lbl and lbl != "UNKNOWN"
+        }
+        if track.label and track.label != "UNKNOWN":
+            hint_labels.add(track.label)
+
+        track_center = 0.5 * (frames_sorted[0] + frames_sorted[-1])
+        track_half_span = max(1.0, (frames_sorted[-1] - frames_sorted[0]) / 2.0)
 
         for label, label_samples in label_groups.items():
             vote_count = len(label_samples)
@@ -187,16 +182,30 @@ def _apply_sample_votes_to_tracks(
             if mean_score < min_score:
                 continue
 
+            if hint_labels and label not in hint_labels:
+                continue
+
             sample_frames = sorted(frame for frame, _ in label_samples)
             start_frame = max(frames_sorted[0], sample_frames[0] - window_frames)
             end_frame = min(frames_sorted[-1], sample_frames[-1] + window_frames)
+            frames_applied = 0
 
             for frame_idx in frames_sorted:
                 if frame_idx < start_frame or frame_idx > end_frame:
                     continue
                 if frame_idx in track.label_scores:
                     continue
-                track.add_label(frame_idx, label, mean_score)
+                if window_frames > 0:
+                    nearest = min(abs(frame_idx - sample_frame) for sample_frame in sample_frames)
+                    if nearest > window_frames:
+                        continue
+                center_distance = abs(frame_idx - track_center)
+                weight = max(0.0, 1.0 - (center_distance / track_half_span))
+                if weight <= 0.15:
+                    continue
+                weighted_score = mean_score * weight
+                track.add_label(frame_idx, label, weighted_score)
+                frames_applied += 1
                 boxes = frame_annotations.get(frame_idx)
                 if boxes:
                     for box in boxes:
@@ -205,13 +214,18 @@ def _apply_sample_votes_to_tracks(
                             and (not box.get("label") or box.get("label") == "UNKNOWN")
                         ):
                             box["label"] = label
-                            box["score"] = mean_score
+                            box["score"] = weighted_score
                             break
 
+            if frames_applied == 0:
+                continue
+
+            hint_labels.add(label)
             track.label_votes[label] = track.label_votes.get(label, 0.0) + (mean_score * vote_count)
             applied_labels[label] = {
                 "votes": float(vote_count),
                 "mean_score": mean_score,
+                "frames": int(frames_applied),
             }
 
         if applied_labels:
@@ -332,6 +346,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override frame sampling stride",
     )
+    parser.add_argument(
+        "--emit_match_stats",
+        type=Path,
+        default=None,
+        help="Optional path to write raw match statistics JSON",
+    )
+    parser.add_argument(
+        "--log_splits",
+        type=Path,
+        default=None,
+        help="Optional path to write track split telemetry JSON",
+    )
+    parser.add_argument(
+        "--dump_per_person",
+        type=Path,
+        default=None,
+        help="Optional path to write per-person screen time JSON",
+    )
+    parser.add_argument(
+        "--dump_fallback",
+        type=Path,
+        default=None,
+        help="Optional path to write fallback usage JSON",
+    )
     return parser.parse_args()
 
 
@@ -369,6 +407,13 @@ def main() -> None:
     )
     
     similarity_th = args.similarity_th if args.similarity_th is not None else pipeline_cfg.get("similarity_th", 0.82)
+    if similarity_th < MIN_PER_LABEL_THRESHOLD:
+        LOGGER.warning(
+            "Configured similarity_th=%.3f below recommended minimum %.2f; clamping.",
+            similarity_th,
+            MIN_PER_LABEL_THRESHOLD,
+        )
+        similarity_th = MIN_PER_LABEL_THRESHOLD
     embed_every_n_setting = args.embed_every_n if args.embed_every_n is not None else pipeline_cfg.get("embed_every_n", 2)
     embed_every_n = int(embed_every_n_setting or 1)
     if embed_every_n < 1:
@@ -378,12 +423,28 @@ def main() -> None:
         args.identity_split if args.identity_split is not None else pipeline_cfg.get("identity_split_enabled", True)
     )
     # CLI flag overrides config; if not set on CLI, use config default (true)
-    identity_split_min_frames = args.identity_split_min_frames if args.identity_split_min_frames is not None else pipeline_cfg.get("identity_split_min_frames", 5)
-    identity_change_margin = args.identity_change_margin if args.identity_change_margin is not None else pipeline_cfg.get("identity_change_margin", 0.05)
+    identity_split_min_frames = (
+        args.identity_split_min_frames
+        if args.identity_split_min_frames is not None
+        else pipeline_cfg.get("identity_split_min_frames", 12)
+    )
+    identity_change_margin = (
+        args.identity_change_margin
+        if args.identity_change_margin is not None
+        else pipeline_cfg.get("identity_change_margin", 0.08)
+    )
     vote_decay = pipeline_cfg.get("vote_decay", 0.99)
     flip_tolerance = pipeline_cfg.get("flip_tolerance", 0.30)
     dilate_track_px = float(pipeline_cfg.get("dilate_track_px", 0.0))
     face_in_track_iou = float(pipeline_cfg.get("face_in_track_iou", 0.30))
+    min_margin = float(pipeline_cfg.get("match_min_margin", DEFAULT_MIN_MARGIN))
+    if min_margin < DEFAULT_MIN_MARGIN:
+        LOGGER.warning(
+            "match_min_margin %.3f below default %.3f; using default.",
+            min_margin,
+            DEFAULT_MIN_MARGIN,
+        )
+        min_margin = DEFAULT_MIN_MARGIN
 
     LOGGER.info(
         "Runtime config: providers=%s stride=%d embed_every_n=%d person_conf=%.2f face_conf=%.2f",
@@ -401,10 +462,11 @@ def main() -> None:
         identity_change_margin,
     )
     LOGGER.info(
-        "Matching config: similarity_th=%.3f vote_decay=%.3f flip_tolerance=%.3f",
+        "Matching config: similarity_th=%.3f vote_decay=%.3f flip_tolerance=%.3f min_margin=%.3f",
         similarity_th,
         vote_decay,
         flip_tolerance,
+        min_margin,
     )
     LOGGER.info(
         "Association config: face_in_track_iou=%.2f dilate_track_px=%.3f",
@@ -413,11 +475,35 @@ def main() -> None:
     )
     
     per_label_th_cfg = pipeline_cfg.get("per_label_similarity_th", {})
-    per_label_th: Dict[str, float] = {
-        str(label): float(threshold) for label, threshold in per_label_th_cfg.items()
-    }
-    per_label_th.update(PER_LABEL_SIMILARITY_TH_OVERRIDES)
-    min_margin = float(pipeline_cfg.get("match_min_margin", DEFAULT_MIN_MARGIN))
+    per_label_th: Dict[str, float] = {}
+    for label, threshold in per_label_th_cfg.items():
+        coerced = max(float(threshold), MIN_PER_LABEL_THRESHOLD)
+        if not math.isclose(coerced, float(threshold)):
+            LOGGER.warning(
+                "per_label_similarity_th[%s]=%.3f below minimum %.2f; clamping to %.3f",
+                label,
+                float(threshold),
+                MIN_PER_LABEL_THRESHOLD,
+                coerced,
+            )
+        per_label_th[str(label)] = coerced
+    default_similarity = max(similarity_th, MIN_PER_LABEL_THRESHOLD)
+    per_label_th.setdefault("DEFAULT", default_similarity)
+
+    per_label_floor_cfg = pipeline_cfg.get("per_label_similarity_floor", {})
+    per_label_floor: Dict[str, float] = {}
+    for label, value in per_label_floor_cfg.items():
+        coerced = max(float(value), PER_LABEL_SIMILARITY_FLOOR)
+        if not math.isclose(coerced, float(value)):
+            LOGGER.warning(
+                "per_label_similarity_floor[%s]=%.3f below minimum %.2f; clamping to %.3f",
+                label,
+                float(value),
+                PER_LABEL_SIMILARITY_FLOOR,
+                coerced,
+            )
+        per_label_floor[str(label)] = coerced
+    per_label_floor.setdefault("DEFAULT", PER_LABEL_SIMILARITY_FLOOR)
 
     matcher = TrackVotingMatcher(
         facebank_embeddings,
@@ -428,7 +514,7 @@ def main() -> None:
         identity_split_min_frames=identity_split_min_frames,
         identity_change_margin=identity_change_margin,
         per_label_th=per_label_th,
-        per_label_floor=PER_LABEL_SIMILARITY_FLOOR,
+        per_label_floor=per_label_floor,
         min_margin=min_margin,
     )
 
@@ -717,6 +803,80 @@ def main() -> None:
         sum(len(t.label_scores) for t in tracks),
     )
 
+    match_score_stats = {"correct": [], "incorrect": []}
+    total_splits = 0
+    mixed_track_ids: List[int] = []
+    per_person_subtracks: Dict[str, int] = defaultdict(int)
+
+    for track in tracks:
+        frame_label_map: Dict[int, str] = {}
+        if track.subtracks:
+            for subtrack in track.subtracks:
+                if subtrack.label:
+                    per_person_subtracks[subtrack.label] += 1
+                if subtrack.label and subtrack.frame_scores:
+                    for frame_idx in subtrack.frame_scores.keys():
+                        frame_label_map[frame_idx] = subtrack.label
+            if len(track.subtracks) > 1:
+                total_splits += len(track.subtracks) - 1
+        elif track.label and track.label != "UNKNOWN":
+            per_person_subtracks[track.label] += 1
+        if track.label_scores:
+            for frame_idx, (label, _) in track.label_scores.items():
+                frame_label_map.setdefault(frame_idx, label)
+
+        match_labels = {label for label, _ in track.face_matches.values()}
+        if len(match_labels) > 1 and len(track.subtracks) <= 1:
+            mixed_track_ids.append(track.track_id)
+
+        for frame_idx, (label, score) in track.face_matches.items():
+            final_label = frame_label_map.get(frame_idx)
+            if final_label is None:
+                continue
+            if final_label == label:
+                match_score_stats["correct"].append(float(score))
+            else:
+                match_score_stats["incorrect"].append(float(score))
+
+    fallback_counts: Dict[str, int] = defaultdict(int)
+    for label_payload in sample_votes.values():
+        for label, stats in label_payload.items():
+            frames = int(stats.get("frames", 0))
+            if frames <= 0:
+                continue
+            fallback_counts[label] += frames
+
+    if mixed_track_ids:
+        LOGGER.info(
+            "Detected %d mixed tracks without splits: %s",
+            len(mixed_track_ids),
+            sorted(mixed_track_ids),
+        )
+
+    telemetry_payload = {
+        "match_scores": match_score_stats,
+        "fallback_counts": dict(fallback_counts),
+        "track_splits": {
+            "total_splits": int(total_splits),
+            "mixed_tracks": len(mixed_track_ids),
+            "per_person_subtracks": dict(per_person_subtracks),
+        },
+        "matcher": matcher.telemetry_snapshot(),
+    }
+
+    if args.emit_match_stats:
+        ensure_dir(args.emit_match_stats.parent)
+        dump_json(args.emit_match_stats, match_score_stats)
+        LOGGER.info("Match statistics written: %s", args.emit_match_stats)
+    if args.log_splits:
+        ensure_dir(args.log_splits.parent)
+        dump_json(args.log_splits, telemetry_payload["track_splits"])
+        LOGGER.info("Track splits written: %s", args.log_splits)
+    if args.dump_fallback:
+        ensure_dir(args.dump_fallback.parent)
+        dump_json(args.dump_fallback, dict(fallback_counts))
+        LOGGER.info("Fallback usage written: %s", args.dump_fallback)
+
     max_gap_ms = args.max_gap_ms if args.max_gap_ms is not None else pipeline_cfg.get("max_gap_ms", 200)
     min_run_ms = args.min_run_ms if args.min_run_ms is not None else pipeline_cfg.get("min_run_ms", 750)
 
@@ -725,7 +885,7 @@ def main() -> None:
         fps=fps,
         max_gap_ms=max_gap_ms,
         min_run_ms=min_run_ms,
-        use_subtracks=identity_split_enabled,
+        use_subtracks=True,
     )
 
     coverage_labels = missing_labels_with_coverage(
@@ -793,6 +953,16 @@ def main() -> None:
         LOGGER.info("Segments by label: %s", label_counts)
     
     totals_df = aggregate.segments_to_totals(segments)
+    per_person_totals = (
+        {str(row["label"]): float(row["duration_ms"]) for _, row in totals_df.iterrows()}
+        if not totals_df.empty
+        else {}
+    )
+
+    if args.dump_per_person:
+        ensure_dir(args.dump_per_person.parent)
+        dump_json(args.dump_per_person, per_person_totals)
+        LOGGER.info("Per-person totals written: %s", args.dump_per_person)
     video_duration_ms = (frame_idx + 1) / fps * 1000.0 if frame_idx >= 0 else 0.0
     timeline_df = aggregate.segments_to_timeline(segments, fps, video_duration_ms)
     track_timeline_df = aggregate.segments_to_track_timeline(segments, video_duration_ms)
@@ -858,6 +1028,22 @@ def main() -> None:
             ],
         },
     )
+
+    telemetry_payload.update(
+        {
+            "video": str(video_path),
+            "fps": float(fps),
+            "similarity_th": float(similarity_th),
+            "min_margin": float(min_margin),
+            "per_label_thresholds": per_label_th,
+            "totals": totals_df.to_dict(orient="records"),
+            "segment_count": len(segments),
+            "sample_fallback_tracks": len(sample_votes),
+        }
+    )
+    telemetry_path = output_dir / f"{video_stem}-telemetry.json"
+    dump_json(telemetry_path, telemetry_payload)
+    LOGGER.info("Telemetry written: %s", telemetry_path)
 
     LOGGER.info(
         "Tracker outputs written: totals=%s segments=%s tracks=%s timeline=%s track_timeline=%s annotations=%s",
@@ -991,13 +1177,27 @@ def _associate_face(
 ) -> Optional[int]:
     best_id: Optional[int] = None
     best_iou = 0.0
+    best_center_distance = float("inf")
     frame_width, frame_height = frame_size
     for track_id, obs in track_lookup.items():
-        dilated = _dilate_bbox(obs.bbox, dilate_px, frame_width, frame_height)
+        track_bbox = obs.bbox
+        dilated = _dilate_bbox(track_bbox, dilate_px, frame_width, frame_height)
         overlap = iou(face_bbox, dilated)
-        if overlap >= threshold and overlap > best_iou:
+        if overlap < threshold:
+            continue
+        face_cx = (face_bbox[0] + face_bbox[2]) * 0.5
+        face_cy = (face_bbox[1] + face_bbox[3]) * 0.5
+        track_cx = (track_bbox[0] + track_bbox[2]) * 0.5
+        track_cy = (track_bbox[1] + track_bbox[3]) * 0.5
+        center_distance = math.hypot(face_cx - track_cx, face_cy - track_cy)
+        face_area = max(bbox_area(face_bbox), 1e-6)
+        max_center_distance = max(0.25 * math.sqrt(face_area), 32.0)
+        if center_distance > max_center_distance:
+            continue
+        if overlap > best_iou or (math.isclose(overlap, best_iou, rel_tol=1e-3) and center_distance < best_center_distance):
             best_id = track_id
             best_iou = overlap
+            best_center_distance = center_distance
     return best_id
 
 

@@ -33,7 +33,7 @@ class TrackVotingMatcher:
         identity_change_margin: float = 0.08,
         per_label_th: Optional[Dict[str, float]] = None,
         per_label_floor: Optional[Dict[str, float]] = None,
-        min_margin: float = 0.0,
+        min_margin: float = 0.05,
     ) -> None:
         self.facebank = {label: l2_normalize(vec) for label, vec in facebank.items()}
         self.similarity_th = similarity_th
@@ -46,6 +46,14 @@ class TrackVotingMatcher:
         self.per_label_th = per_label_th or {}
         self.per_label_floor = per_label_floor or {}
         self.min_margin = min_margin
+        self._telemetry = {
+            "matches": 0,
+            "threshold_rejects": 0,
+            "margin_rejects": 0,
+            "floor_acceptances": 0,
+            "label_matches": {},
+            "splits": 0,
+        }
 
     def best_match(self, embedding: np.ndarray) -> Optional[Tuple[str, float]]:
         if not self.facebank:
@@ -63,10 +71,17 @@ class TrackVotingMatcher:
         required = self.per_label_th.get(top_label, self.similarity_th)
         if top_score < required:
             fallback = self.per_label_floor.get(top_label)
-            if fallback is None or top_score < fallback:
+            if fallback is not None and top_score >= fallback:
+                self._telemetry["floor_acceptances"] = self._telemetry.get("floor_acceptances", 0) + 1
+            else:
+                self._telemetry["threshold_rejects"] = self._telemetry.get("threshold_rejects", 0) + 1
                 return None
         if (top_score - runner_score) < self.min_margin:
+            self._telemetry["margin_rejects"] = self._telemetry.get("margin_rejects", 0) + 1
             return None
+        self._telemetry["matches"] = self._telemetry.get("matches", 0) + 1
+        label_matches = self._telemetry.setdefault("label_matches", {})
+        label_matches[top_label] = label_matches.get(top_label, 0) + 1
         return top_label, top_score
 
     def topk(self, embedding: np.ndarray, k: int = 3) -> List[Tuple[str, float]]:
@@ -193,11 +208,18 @@ class TrackVotingMatcher:
                     current_score,
                     track.label_change_streak,
                 )
+                self._telemetry["splits"] = self._telemetry.get("splits", 0) + 1
                 self._finalize_subtrack(track, current_label, split_frame)
                 track.current_subtrack_label = new_label
                 track.current_subtrack_start_frame = split_frame
                 track.label_change_candidate = None
                 track.label_change_streak = 0
+
+    def telemetry_snapshot(self) -> Dict[str, object]:
+        """Return a copy of matcher telemetry suitable for JSON serialization."""
+        snapshot = dict(self._telemetry)
+        snapshot["label_matches"] = dict(snapshot.get("label_matches", {}))
+        return snapshot
 
     def _finalize_subtrack(self, track: TrackState, label: str, end_frame: Optional[int] = None) -> None:
         """Create a subtrack from current segment and add to track."""
