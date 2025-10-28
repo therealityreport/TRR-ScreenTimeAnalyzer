@@ -7,7 +7,7 @@ import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import cv2
 import numpy as np
@@ -20,7 +20,25 @@ from screentime.tracking.bytetrack_wrap import ByteTrackWrapper, TrackAccumulato
 from screentime.types import FaceSample, ManifestEntry, TrackState, bbox_area, iou
 from screentime.recognition.embed_arcface import ArcFaceEmbedder
 
+if TYPE_CHECKING:  # pragma: no cover - type hints only
+    import cv2 as cv2_module  # noqa: F401
+
 LOGGER = logging.getLogger("screentime.harvest")
+
+
+def _require_cv2() -> "cv2_module":
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required for video operations but is not installed")
+    return cast("cv2_module", cv2)
+
+
+def _percentile(values: Sequence[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    try:
+        return float(np.percentile(values, pct))
+    except TypeError:  # pragma: no cover - legacy numpy fallback
+        return float(np.percentile(values, pct, interpolation="linear"))
 
 
 @dataclass
@@ -163,7 +181,7 @@ class TrackSamplingState:
         if pct_setting is None:
             pct_setting = config.min_sharpness_pct
         if pct_setting is not None and sorted_candidates:
-            sharp_thresholds.append(float(np.percentile([cand.sharpness for cand in sorted_candidates], pct_setting)))
+            sharp_thresholds.append(_percentile([cand.sharpness for cand in sorted_candidates], pct_setting))
         if config.min_sharpness_laplacian is not None:
             sharp_thresholds.append(float(config.min_sharpness_laplacian))
         sharp_gate = max(sharp_thresholds) if sharp_thresholds else None
@@ -174,8 +192,11 @@ class TrackSamplingState:
         profile_floor = float(max(0.0, config.profile_min_frontalness))
         for candidate in sorted_candidates:
             if sharp_gate is not None and candidate.sharpness < sharp_gate:
-                candidate.reason = "rejected_sharpness"
-                continue
+                if not eligible_candidates:
+                    candidate.reason = "picked_sharpness_floor"
+                else:
+                    candidate.reason = "rejected_sharpness"
+                    continue
             if candidate.frontalness < config.min_frontalness:
                 if profile_quota > 0 and candidate.frontalness >= profile_floor:
                     candidate.reason = "profile_pool"
@@ -239,8 +260,8 @@ class TrackSamplingState:
 
         frontal_threshold: Optional[float] = None
         if config.frontal_pctile is not None and eligible_candidates:
-            frontal_threshold = float(
-                np.percentile([cand.frontalness for cand in eligible_candidates], config.frontal_pctile)
+            frontal_threshold = _percentile(
+                [cand.frontalness for cand in eligible_candidates], config.frontal_pctile
             )
 
         if frontal_threshold is not None and config.min_frontal_picks > 0:
@@ -325,7 +346,7 @@ class HarvestRunner:
         output_root: Path,
         *,
         legacy_layout: bool = True,
-        cap: Optional[cv2.VideoCapture] = None,
+        cap: Optional["cv2_module.VideoCapture"] = None,
     ) -> Path:
         # Lazy init embedder to keep tests lightweight; fall back if unavailable
         identity_guard_requested = self.config.identity_guard
@@ -343,20 +364,21 @@ class HarvestRunner:
                 self.embedder = None
                 self.config.identity_guard = False
                 self.config.identity_split = False
+        cv2_mod = _require_cv2()
         capture = cap
         owns_cap = False
         if capture is None:
-            capture = cv2.VideoCapture(str(video_path))
+            capture = cv2_mod.VideoCapture(str(video_path))
             owns_cap = True
         if not capture.isOpened():
             raise RuntimeError(f"Unable to open video {video_path}")
 
         cap = capture
 
-        fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fps = capture.get(cv2_mod.CAP_PROP_FPS) or 30.0
+        frame_count = int(capture.get(cv2_mod.CAP_PROP_FRAME_COUNT)) or 0
+        height = int(capture.get(cv2_mod.CAP_PROP_FRAME_HEIGHT))
+        width = int(capture.get(cv2_mod.CAP_PROP_FRAME_WIDTH))
         frame_area = float(width * height)
         self.tracker.set_frame_rate(fps)
 
@@ -382,7 +404,7 @@ class HarvestRunner:
                 return
             track_dir = _candidate_dir(track_id)
             candidate_path = track_dir / f"F{frame_idx:06d}.jpg"
-            cv2.imwrite(str(candidate_path), image)
+            cv2_mod.imwrite(str(candidate_path), image)
 
         accumulator = TrackAccumulator()
         sampling_states: Dict[int, TrackSamplingState] = {}
@@ -958,7 +980,10 @@ class HarvestRunner:
                     )
                     continue
 
-                aligned = self.face_detector.align_to_112(frame, face.landmarks, face.bbox)
+                landmarks = face.landmarks
+                if getattr(self.face_detector, "force_bbox_alignment", False):
+                    landmarks = None
+                aligned = self.face_detector.align_to_112(frame, landmarks, face.bbox)
                 sharpness = self._compute_sharpness(aligned)
                 area = bbox_area(face.bbox)
                 area_frac = area / frame_area if frame_area else 0.0
@@ -1328,7 +1353,7 @@ class HarvestRunner:
                 sample_path = track_dir / sample_filename
                 sample.path = sample_path
                 if sample.image is not None:
-                    cv2.imwrite(str(sample_path), sample.image)
+                    cv2_mod.imwrite(str(sample_path), sample.image)
                     sample.image = None
 
             total_selected += len(samples)
@@ -1337,7 +1362,7 @@ class HarvestRunner:
         if self.config.debug_rejections and debug_write_queue:
             for image, path in debug_write_queue:
                 ensure_dir(path.parent)
-                cv2.imwrite(str(path), image)
+                cv2_mod.imwrite(str(path), image)
             debug_write_queue.clear()
 
         # Build manifest per harvest id, carrying source ByteTrack id
@@ -1530,6 +1555,14 @@ class HarvestRunner:
         return (nx1, ny1, nx2, ny2)
 
     def _compute_sharpness(self, aligned: np.ndarray) -> float:
+        if cv2 is None or getattr(cv2, "__stub__", False):
+            gray = aligned.astype(np.float32)
+            if gray.ndim == 3:
+                gray = gray.mean(axis=2)
+            gx = np.diff(gray, axis=1, append=gray[:, -1:])
+            gy = np.diff(gray, axis=0, append=gray[-1:, :])
+            variance = float(((gx ** 2 + gy ** 2) / 2.0).mean())
+            return variance
         gray = cv2.cvtColor(aligned, cv2.COLOR_RGB2GRAY)
         variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         return variance
