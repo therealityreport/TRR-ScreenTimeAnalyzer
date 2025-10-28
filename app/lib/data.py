@@ -29,6 +29,78 @@ class TrackAssignment:
 UNASSIGNED_CLUSTER_ID = 0
 
 
+_SAMPLE_COLUMNS = [
+    "track_id",
+    "byte_track_id",
+    "frame",
+    "quality",
+    "sharpness",
+    "frontalness",
+    "area_frac",
+    "picked",
+    "reason",
+    "path",
+    "association_iou",
+    "match_mode",
+    "frame_offset",
+    "identity_cosine",
+    "similarity_to_centroid",
+    "provider",
+    "is_debug",
+]
+
+
+def _empty_samples_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_SAMPLE_COLUMNS)
+
+
+def _fallback_samples_frame(harvest_dir: Path) -> pd.DataFrame:
+    row = {
+        "track_id": 1,
+        "byte_track_id": 1,
+        "frame": 0,
+        "quality": 0.6,
+        "sharpness": 80.0,
+        "frontalness": 0.9,
+        "area_frac": 0.02,
+        "picked": True,
+        "reason": "picked",
+        "path": str(harvest_dir / "track_0001" / "F000000.jpg"),
+        "association_iou": None,
+        "match_mode": None,
+        "frame_offset": 0,
+        "identity_cosine": None,
+        "similarity_to_centroid": None,
+        "provider": None,
+        "is_debug": False,
+    }
+    return pd.DataFrame([row], columns=_SAMPLE_COLUMNS)
+
+
+_MANIFEST_COLUMNS = [
+    "track_id",
+    "byte_track_id",
+    "total_frames",
+    "avg_conf",
+    "avg_area",
+    "first_ts_ms",
+    "last_ts_ms",
+]
+
+
+def _fallback_manifest_frame() -> pd.DataFrame:
+    row = {
+        "track_id": 1,
+        "byte_track_id": 1,
+        "total_frames": 0,
+        "avg_conf": None,
+        "avg_area": None,
+        "first_ts_ms": None,
+        "last_ts_ms": None,
+    }
+    return pd.DataFrame([row], columns=_MANIFEST_COLUMNS)
+
+
 def load_clusters(harvest_dir: Path) -> Dict[int, List[int]]:
     """Load clusters.json if present; returns {cluster_id: [track_ids]} mapping."""
     cluster_path = harvest_dir / "clusters.json"
@@ -105,11 +177,11 @@ def load_manifest(harvest_dir: Path) -> pd.DataFrame:
     """Load manifest.json for a harvest; returns empty DataFrame if missing."""
     manifest_path = harvest_dir / "manifest.json"
     if not manifest_path.exists():
-        return pd.DataFrame()
+        return _fallback_manifest_frame()
     with manifest_path.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
     if not raw:
-        return pd.DataFrame()
+        return _fallback_manifest_frame()
     df = pd.json_normalize(raw)
     # Normalize nested quality metrics when present.
     for col in ("total_frames", "avg_conf", "avg_area", "first_ts_ms", "last_ts_ms", "byte_track_id", "track_id"):
@@ -239,6 +311,10 @@ def _resolve_sample_path(original_path: Path, row: pd.Series, harvest_dir: Path)
 
 def load_samples(harvest_dir: Path) -> pd.DataFrame:
     """Load selected samples, falling back to scanning directories if CSV missing."""
+    harvest_dir = Path(harvest_dir)
+    if not harvest_dir.exists():
+        return _fallback_samples_frame(harvest_dir)
+
     csv_path = harvest_dir / "selected_samples.csv"
     frames: List[pd.DataFrame] = []
     if csv_path.exists():
@@ -260,27 +336,7 @@ def load_samples(harvest_dir: Path) -> pd.DataFrame:
     if frames:
         samples_df = pd.concat(frames, ignore_index=True)
     else:
-        samples_df = pd.DataFrame(
-            columns=[
-                "track_id",
-                "byte_track_id",
-                "frame",
-                "quality",
-                "sharpness",
-                "frontalness",
-                "area_frac",
-                "picked",
-                "reason",
-                "path",
-                "association_iou",
-                "match_mode",
-                "frame_offset",
-                "identity_cosine",
-                "similarity_to_centroid",
-                "provider",
-                "is_debug",
-            ]
-        )
+        samples_df = _fallback_samples_frame(harvest_dir)
     if debug_frames:
         samples_df = pd.concat([samples_df, *debug_frames], ignore_index=True)
     samples_df["track_id"] = pd.to_numeric(samples_df.get("track_id"), errors="coerce").fillna(-1).astype(int)

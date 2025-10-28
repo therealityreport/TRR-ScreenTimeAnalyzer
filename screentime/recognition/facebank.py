@@ -70,7 +70,6 @@ def build_facebank(
                 image,
                 None,
                 (0, 0, image.shape[1], image.shape[0]),
-                force_bbox=getattr(aligner, "force_bbox_alignment", False),
             )
         else:
             aligned = cv2.resize(image, (112, 112))

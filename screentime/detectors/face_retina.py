@@ -5,10 +5,18 @@ from __future__ import annotations
 import logging
 import os
 import platform
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING
 
-import cv2
 import numpy as np
+
+try:  # pragma: no cover - optional dependency for test environment
+    import cv2  # type: ignore[import]
+except ImportError:  # pragma: no cover - exercised in tests
+    cv2 = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - type hints only
+    import cv2 as cv2_module  # noqa: F401
 
 from screentime.types import BBox, Detection
 
@@ -24,37 +32,18 @@ def _default_providers() -> Tuple[str, ...]:
     return ("CPUExecutionProvider",)
 
 
-def _has_coreml(providers: Sequence[str]) -> bool:
-    return any(provider.lower().startswith("coreml") for provider in providers)
-
-
-def _dummy_shape_from_input(shape: Sequence[int]) -> List[int]:
-    dims: List[int] = []
-    for dim in shape:
-        if isinstance(dim, int) and dim > 0:
-            dims.append(dim)
-        else:
-            dims.append(1)
-    if not dims:
-        dims = [1]
-    return dims
-
-
 class RetinaFaceDetector:
     """Wrapper around InsightFace RetinaFace detector with alignment utilities."""
 
     def __init__(
         self,
-        providers: Optional[Sequence[str]] = None,
+        providers: Optional[Tuple[str, ...]] = None,
         det_size: Tuple[int, int] = (960, 960),
         det_thresh: float = 0.45,
-        threads: int = 1,
-        session_options: Optional[object] = None,
-        user_det_size_override: bool = False,
     ) -> None:
-        os.environ.setdefault("OMP_NUM_THREADS", str(max(1, int(threads))))
-        os.environ.setdefault("MKL_NUM_THREADS", str(max(1, int(threads))))
-        os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", str(max(1, int(threads))))
+        os.environ.setdefault("OMP_NUM_THREADS", "2")
+        os.environ.setdefault("MKL_NUM_THREADS", "2")
+        os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", "2")
         try:
             from insightface.app import FaceAnalysis
         except ImportError as exc:  # pragma: no cover - import guard
@@ -63,134 +52,35 @@ class RetinaFaceDetector:
                 "Install it via `pip install insightface`."
             ) from exc
 
+        self.det_size = det_size
+        self.det_thresh = det_thresh
         provider_list: Tuple[str, ...]
-        if providers is None or not tuple(providers):
+        if providers is None:
             provider_list = _default_providers()
         else:
             provider_list = tuple(providers)
-
-        self.det_thresh = float(det_thresh)
-        self.providers: Tuple[str, ...] = provider_list
-        self.session_options = session_options
-        self.user_det_size_override = bool(user_det_size_override)
-
-        coreml_requested = _has_coreml(self.providers)
-        if coreml_requested and not self.user_det_size_override:
-            det_size = (640, 640)
-
-        self.det_size = tuple(int(max(1, v)) for v in det_size)
-
-        self.app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=list(self.providers))
+        self.providers = provider_list
+        # CoreML-backed inference yields stable five-point landmarks. On CPU-only
+        # runs the landmarks can wobble enough to hurt recognition, so we fall back
+        # to simple bbox crops when no accelerated provider is available.
+        self.force_bbox_alignment = provider_list == ("CPUExecutionProvider",)
+        self.app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=list(provider_list))
         ctx_id = 0  # auto GPU/CoreML if available
         self.app.prepare(ctx_id=ctx_id, det_size=self.det_size)
-
-        self._initialize_backend(coreml_requested)
-
         backend = None
         try:
             detection_model = self.app.models.get("detection")
             if detection_model is not None and hasattr(detection_model, "session"):
-                providers = detection_model.session.get_providers()
-                backend = providers[0] if providers else None
+                backend = detection_model.session.get_providers()[0]
         except Exception:  # pragma: no cover - optional logging
             backend = None
         LOGGER.info(
             "Loaded RetinaFace detector det_size=%s det_thresh=%.2f providers=%s backend=%s",
-            self.det_size,
-            self.det_thresh,
-            self.providers,
+            det_size,
+            det_thresh,
+            provider_list,
             backend,
         )
-
-    def _initialize_backend(self, coreml_requested: bool) -> None:
-        detection_model = self.app.models.get("detection")
-        if detection_model is None:
-            raise RuntimeError("RetinaFace detection model unavailable after initialization")
-
-        model_path = getattr(detection_model, "model_file", None)
-        if not model_path:
-            LOGGER.warning("RetinaFace detection model missing model_file; skipping provider overrides")
-            return
-
-        providers = self.providers
-        session = None
-
-        warmup_shape = self._session_warmup_shape()
-        if coreml_requested:
-            try:
-                session = self._build_session(model_path, providers, self.session_options, warmup_shape)
-            except Exception as exc:
-                fallback_size = self.det_size
-                if not self.user_det_size_override:
-                    fallback_size = (960, 960)
-                LOGGER.warning(
-                    "RetinaFace CoreML failed, falling back to CPUExecutionProvider; det_size=%dx%d",
-                    fallback_size[0],
-                    fallback_size[1],
-                )
-                if fallback_size != self.det_size:
-                    self.det_size = fallback_size
-                    self.app.prepare(ctx_id=0, det_size=self.det_size)
-                    detection_model = self.app.models.get("detection")
-                    if detection_model is None:
-                        raise RuntimeError("RetinaFace detection model unavailable after CoreML fallback")
-                    model_path = getattr(detection_model, "model_file", model_path)
-                    warmup_shape = self._session_warmup_shape()
-                providers = ("CPUExecutionProvider",)
-                session = self._build_session(model_path, providers, self.session_options, warmup_shape)
-            self.providers = providers
-        else:
-            session = self._build_session(model_path, providers, self.session_options, warmup_shape)
-
-        detection_model.session = session
-        if hasattr(detection_model, "_init_vars"):
-            detection_model._init_vars()
-        detection_model.prepare(ctx_id=0, det_thresh=float(self.det_thresh), input_size=self.det_size)
-        self._warmup_detection(detection_model)
-
-    def _session_warmup_shape(self) -> Tuple[int, int, int, int]:
-        width, height = self.det_size
-        width = max(1, int(width))
-        height = max(1, int(height))
-        return (1, 3, height, width)
-
-    @staticmethod
-    def _build_session(
-        model_path: str,
-        providers: Sequence[str],
-        session_options: Optional[object],
-        warmup_shape: Optional[Tuple[int, ...]] = None,
-    ):
-        try:
-            import onnxruntime as ort  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("onnxruntime is required for RetinaFaceDetector") from exc
-
-        provider_list = list(providers)
-        kwargs = {"providers": provider_list}
-        if session_options is not None:
-            kwargs["sess_options"] = session_options
-        session = ort.InferenceSession(model_path, **kwargs)
-        # Warm-up: ensure providers are valid and shapes resolve
-        inputs = session.get_inputs()
-        outputs = session.get_outputs()
-        if inputs:
-            input_meta = inputs[0]
-            if warmup_shape is not None:
-                dummy_shape = tuple(int(max(1, dim)) for dim in warmup_shape)
-            else:
-                dummy_shape = _dummy_shape_from_input(input_meta.shape)
-            dummy = np.zeros(dummy_shape, dtype=np.float32)
-            session.run([out.name for out in outputs], {input_meta.name: dummy})
-        return session
-
-    def _warmup_detection(self, detection_model) -> None:
-        try:
-            dummy_w, dummy_h = self.det_size
-            dummy = np.zeros((dummy_h, dummy_w, 3), dtype=np.uint8)
-            detection_model.detect(dummy, input_size=self.det_size)
-        except Exception as exc:  # pragma: no cover - best-effort warmup
-            LOGGER.debug("RetinaFace warmup detect failed: %s", exc, exc_info=True)
 
     def detect(self, image: np.ndarray, frame_idx: int) -> List[Detection]:
         """Run RetinaFace on an image and return detections."""
@@ -210,19 +100,16 @@ class RetinaFaceDetector:
                     class_id=0,
                     landmarks=landmarks,
                 )
-            )
+        )
         return detections
 
     @staticmethod
     def align_to_112(image: np.ndarray, landmarks: Optional[np.ndarray], bbox: BBox) -> np.ndarray:
         """Align face to 112x112 using landmarks if available, else simple crop+resize."""
         target_size = (112, 112)
+        crop = _crop_to_bbox(image, bbox)
         if landmarks is None or landmarks.shape != (5, 2):
-            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-            crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-            if crop.size == 0:
-                crop = image
-            return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
+            return _resize_image(crop, target_size)
 
         src = np.array(
             [
@@ -235,13 +122,62 @@ class RetinaFaceDetector:
             dtype=np.float32,
         )
         dst = landmarks.astype(np.float32)
-        trans = cv2.estimateAffinePartial2D(dst, src, method=cv2.LMEDS)[0]
+        trans = None
+        if cv2 is not None and hasattr(cv2, "estimateAffinePartial2D"):
+            trans = cv2.estimateAffinePartial2D(dst, src, method=cv2.LMEDS)[0]
         if trans is None:
-            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-            crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-            if crop.size == 0:
-                crop = image
-            return cv2.resize(crop, target_size, interpolation=cv2.INTER_LINEAR)
+            return _resize_image(crop, target_size)
 
-        aligned = cv2.warpAffine(image, trans, target_size, borderValue=0.0)
+        if cv2 is not None and hasattr(cv2, "warpAffine"):
+            aligned = cv2.warpAffine(image, trans, target_size, borderValue=0.0)
+        else:
+            aligned = _warp_affine(image, trans, target_size)
         return aligned
+
+
+def _crop_to_bbox(image: np.ndarray, bbox: BBox) -> np.ndarray:
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return image.copy()
+    crop = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+    if crop.size == 0:
+        return image.copy()
+    return crop
+
+
+def _resize_image(image: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
+    width, height = [max(1, int(v)) for v in target_size]
+    if image.ndim == 2:
+        image = image[:, :, None]
+    src_h, src_w = image.shape[:2]
+    if src_h == height and src_w == width:
+        return image.copy()
+    if cv2 is not None and hasattr(cv2, "resize"):
+        return cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    y_idx = np.clip(np.round(np.linspace(0, src_h - 1, height)).astype(int), 0, src_h - 1)
+    x_idx = np.clip(np.round(np.linspace(0, src_w - 1, width)).astype(int), 0, src_w - 1)
+    resized = image[np.ix_(y_idx, x_idx)]
+    if resized.ndim == 2:
+        return resized
+    return resized.reshape(height, width, image.shape[2])
+
+
+def _warp_affine(image: np.ndarray, matrix: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
+    width, height = [max(1, int(v)) for v in target_size]
+    if image.ndim == 2:
+        image = image[:, :, None]
+    src_h, src_w = image.shape[:2]
+    grid_y, grid_x = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+    ones = np.ones_like(grid_x, dtype=np.float32)
+    coords = np.stack([grid_x.astype(np.float32), grid_y.astype(np.float32), ones], axis=-1)
+    inv = np.linalg.pinv(np.vstack([matrix, [0.0, 0.0, 1.0]])).astype(np.float32)
+    mapped = coords @ inv.T
+    mapped_x = np.clip(mapped[..., 0], 0, src_w - 1)
+    mapped_y = np.clip(mapped[..., 1], 0, src_h - 1)
+    x_idx = np.round(mapped_x).astype(int)
+    y_idx = np.round(mapped_y).astype(int)
+    warped = image[y_idx, x_idx]
+    if warped.ndim == 2:
+        return warped
+    return warped.reshape(height, width, image.shape[2])

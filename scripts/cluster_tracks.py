@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-import cv2
+try:  # pragma: no cover - optional dependency for tests
+    import cv2  # type: ignore[import]
+except ImportError:  # pragma: no cover - exercised in tests
+    cv2 = None  # type: ignore[assignment]
 import numpy as np
 import pandas as pd
 from sklearn.cluster import AgglomerativeClustering
@@ -28,7 +31,7 @@ class TrackSamples:
     paths: List[Path]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cluster harvested tracks using ArcFace embeddings.")
     parser.add_argument("harvest_dir", type=Path, help="Harvest directory containing manifest.json and crops.")
     parser.add_argument(
@@ -88,7 +91,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path for a JSON QC report (defaults to harvest_dir/clusters_qc.json).",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_selected_samples(
@@ -142,6 +145,8 @@ def load_selected_samples(
 
 
 def embed_samples(tracks: Sequence[TrackSamples], embedder: ArcFaceEmbedder) -> Dict[int, np.ndarray]:
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required to embed samples but is not installed")
     track_embeddings: Dict[int, np.ndarray] = {}
     for track in tracks:
         embeddings: List[np.ndarray] = []

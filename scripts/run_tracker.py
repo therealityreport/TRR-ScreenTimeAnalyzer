@@ -374,11 +374,13 @@ def main() -> None:
                 if frame_idx - state.last_embed_frame < embed_every_n:
                     should_embed = False
             if should_embed:
+                landmarks = face.landmarks
+                if getattr(face_detector, "force_bbox_alignment", False):
+                    landmarks = None
                 aligned = face_detector.align_to_112(
                     frame,
-                    face.landmarks,
+                    landmarks,
                     face.bbox,
-                    force_bbox=getattr(face_detector, "force_bbox_alignment", False),
                 )
                 embedding = embedder.embed(aligned)
                 match = matcher.best_match(embedding)
